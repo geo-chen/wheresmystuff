@@ -1,44 +1,53 @@
-define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/UI"],
-	function(declare, lang, View, dom, css, style, UI) {
+define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/UI", "Ti/_/Layouts/ConstrainingHorizontal"],
+	function(declare, lang, View, dom, css, style, UI, ConstrainingHorizontal) {
 
 	var setStyle = style.set,
 		isDef = lang.isDef,
-		imagePrefix = "themes/" + require.config.ti.theme + "/UI/TableViewRow/"
+		imagePrefix = "themes/" + require.config.ti.theme + "/UI/TableViewRow/",
 		checkImage = imagePrefix + "check.png",
 		childImage = imagePrefix + "child.png",
 		detailImage = imagePrefix + "detail.png";
 
 	return declare("Ti.UI.TableViewRow", View, {
-		
+
 		// The number of pixels 1 indention equals
 		_indentionScale: 10,
-		
+
 		constructor: function(args) {
-			this.add(this._defaultControl = UI.createView({
-				width: UI.INHERIT,
-				height: UI.INHERIT,
-				layout: "horizontal"
-			}));
-			this._defaultControl._layout._defaultVerticalAlignment = "center";
-			
-			this._defaultControl.add(this._leftImageView = UI.createImageView({
+
+			this._layout = new ConstrainingHorizontal(this);
+
+			this._add(this._leftImageView = UI.createImageView({
 				width: UI.SIZE,
 				height: UI.SIZE
 			})); 
 
-			this._defaultControl.add(this._titleLabel = UI.createLabel({
+			var centerContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.INHERIT
+			});
+			this._add(centerContainer);
+
+			centerContainer._add(this._titleLabel = UI.createLabel({
 				width: UI.INHERIT,
 				height: UI.INHERIT,
 				wordWrap: false
 			}));
 
-			this._defaultControl.add(this._rightImageView = UI.createImageView({
-				width: UI.SIZE, 
+			centerContainer._add(this._contentContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.INHERIT
+			}));
+
+			this._add(this._rightImageView = UI.createImageView({
+				right: 0,
+				width: UI.SIZE,
 				height: UI.SIZE
 			}));
+
+			// Force single tap to be processed.
+			this.addEventListener("singletap");
 		},
-		
-		_usingDefaultControl: 1,
 
 		_defaultWidth: UI.INHERIT,
 
@@ -62,6 +71,16 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_
 				this._titleLabel.color = this.color;
 			}
 			View.prototype._doBackground.apply(this,arguments);
+		},
+
+		add: function(view) {
+			this._contentContainer._add(view);
+			this._publish(view);
+		},
+
+		remove: function(view) {
+			this._contentContainer._remove(view);
+			this._unpublish(view);
 		},
 
 		properties: {
@@ -102,6 +121,11 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_
 					return value;
 				},
 				value: 0
+			},
+			layout: {
+				set: function(value) {
+					this._contentContainer.layout = value;
+				}
 			},
 			leftImage: {
 				set: function(value) {

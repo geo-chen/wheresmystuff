@@ -1,7 +1,8 @@
-define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"], 
-	function(declare, lang, style, Widget, UI) {
+define(["Ti/_/declare", "Ti/_/event", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI", "Ti/Filesystem"], 
+	function(declare, event, lang, style, Widget, UI, Filesystem) {
 
 	var setStyle = style.set,
+		is = require.is,
 		on = require.on,
 		InternalImageView = declare(Widget, {
 
@@ -20,66 +21,69 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 				}
 			},
 
-			_doLayout: function(params) {
+			_preLayout: function(boundingWidth, boundingHeight, isParentWidthSize, isParentHeightSize) {
 				// We have to remove the old style to get the image to scale to its default size,
 				// otherwise we are just reading in whatever we set in the last doLayout(), which is
 				// 0 if the image was not loaded...thus always clamping it to 0.
 				this.domNode.style.width = "";
 				this.domNode.style.height = "";
-				
+
 				var imageRatio = this.domNode.width / this.domNode.height,
-					boundingHeight = params.boundingSize.height,
-					boundingWidth = params.boundingSize.width,
 					values = this.properties.__values__,
-					isParentWidthSize = params.isParentSize.width,
-					isParentHeightSize = params.isParentSize.height;
-
-				function setByHeight() {
-					values.width = boundingHeight * imageRatio;
-					values.height = boundingHeight;
-				}
-
-				function setByWidth() {
-					values.width = boundingWidth;
-					values.height = boundingWidth / imageRatio;
-				}
+					oldWidth = values.width,
+					oldHeight = values.height;
 
 				if (!isParentWidthSize && !isParentHeightSize) {
 					if (boundingWidth / boundingHeight > imageRatio) {
-						setByHeight();
+						values.width = boundingHeight * imageRatio;
+						values.height = boundingHeight;
 					} else {
-						setByWidth();
+						values.width = boundingWidth;
+						values.height = boundingWidth / imageRatio;
 					}
 				} else if (!isParentWidthSize) {
-					setByWidth();
+					values.width = boundingWidth;
+					values.height = boundingWidth / imageRatio;
 				} else if (!isParentHeightSize) {
-					setByHeight();
+					values.width = boundingHeight * imageRatio;
+					values.height = boundingHeight;
 				} else {
 					values.width = UI.SIZE;
 					values.height = UI.SIZE;
 				}
 
-				return Widget.prototype._doLayout.call(this,params);
+				return oldWidth !== values.width || oldHeight !== values.height;
 			},
+
+			_imageRatio: 1,
 
 			properties: {
 				src: {
 					set: function(value) {
 						var node = this.domNode,
-							disp = "none";
+							disp = "none",
+							handles,
 							onerror = lang.hitch(this, function(e) {
+								event.off(handles);
 								this._triggerLayout();
 								this.onerror && this.onerror(e);
 							});
 
 						if (value) {
 							disp = "inherit";
-							on(node, "load", this, function() {
-								this.container._triggerLayout();
-								this.onload && this.onload();
-							});
-							on(node, "error", onerror);
-							on(node, "abort", onerror);
+							handles = [
+								on(node, "load", this, function() {
+									node.style.width = "";
+									node.style.height = "";
+									var imageRatio = node.width / node.height;
+									isNaN(imageRatio) && (imageRatio = node.width === 0 ? 1 : Infinity);
+									this._imageRatio = imageRatio;
+									this._triggerLayout();
+									this.onload && this.onload();
+								}),
+								on(node, "error", onerror),
+								on(node, "abort", onerror)
+							];
 							node.src = require.cache(value) || value;
 						}
 
@@ -93,6 +97,8 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 	return declare("Ti.UI.ImageView", Widget, {
 
 		_createImage: function(src, onload, onerror) {
+			var m = is(src, "String") && src.match(/^(.+)\:\/\//);
+			m && ~Filesystem.protocols.indexOf(m[1]) && (src = Filesystem.getFile(src));
 			switch (src && src.declaredClass) {
 				case "Ti.Filesystem.File":
 					src = src.read();
@@ -102,8 +108,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 			return new InternalImageView({
 				onload: onload,
 				onerror: onerror,
-				src: src,
-				container: this
+				src: src
 			});
 		},
 
@@ -148,7 +153,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 
 		start: function(){
 			if (this._images) {
-				this._setState(1, 0);
+				this._setState(0, 1);
 				this._slideshowCount = 0;
 				this._setSlideshowInterval();
 				this.fireEvent("start");
@@ -203,7 +208,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 				set: function(value) {
 					this._removeAllChildren();
 					this._images = void 0;
-					this.add(this._createImage(value, function() {
+					this._add(this._createImage(value, function() {
 						this.fireEvent("load", {
 							state: "image"
 						});
@@ -220,7 +225,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 						counter = 0,
 						errored = 0;
 					this._removeAllChildren();
-					if (require.is(value, "Array")) {
+					if (is(value, "Array")) {
 						imgs = [];
 						value.forEach(function(val) {
 							var img = this._createImage(val, function() {
@@ -232,7 +237,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 							});
 							setStyle(img.domNode, "display", "none");
 							imgs.push(img);
-							this.add(img);
+							this._add(img);
 						}, this);
 					}
 					this._images = imgs;

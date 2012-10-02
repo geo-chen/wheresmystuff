@@ -1,5 +1,5 @@
-define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/Blob", "Ti/_/event"],
-	function(_, declare, lang, Evented, Network, Blob, event) {
+define(["Ti/_", "Ti/_/declare", "Ti/_/has", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/Blob", "Ti/_/event"],
+	function(_, declare, has, lang, Evented, Network, Blob, event) {
 
 	var is = require.is,
 		on = require.on;
@@ -11,12 +11,12 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 
 			this._handles = [
 				on(xhr, "error", this, "_onError"),
-				on(xhr.upload, "error", this, "_onError"),
+				xhr.upload && on(xhr.upload, "error", this, "_onError"),
 				on(xhr, "progress", this, function(evt) {
 					evt.progress = evt.lengthComputable ? evt.loaded / evt.total : false;
 					is(this.ondatastream, "Function") && this.ondatastream.call(this, evt);
 				}),
-				on(xhr.upload, "progress", this, function(evt) {
+				xhr.upload && on(xhr.upload, "progress", this, function(evt) {
 					evt.progress = evt.lengthComputable ? evt.loaded / evt.total : false;
 					is(this.onsendstream, "Function") && this.onsendstream.call(this, evt);
 				})
@@ -45,6 +45,7 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 								mimeType: xhr.getResponseHeader("Content-Type")
 							});
 							c.responseXML = xhr.responseXML;
+							has("ti-instrumentation") && (instrumentation.stopTest(this._requestInstrumentationTest, this.location));
 							is(this.onload, "Function") && this.onload.call(this);
 						} else {
 							xhr.status / 100 | 0 > 3 && this._onError();
@@ -92,13 +93,12 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 		open: function(method, url, async) {
 			var httpURLFormatter = Ti.Network.httpURLFormatter,
 				c = this.constants,
-				wc = this.withCredentials,
-				async = wc ? true : !!async;
+				wc = this.withCredentials;
 			this.abort();
 			this._xhr.open(
 				c.connectionType = method,
 				c.location = _.getAbsolutePath(httpURLFormatter ? httpURLFormatter(url) : url),
-				async
+				wc || async === void 0 ? true : !!async
 			);
 			wc && (this._xhr.withCredentials = wc);
 		},
@@ -107,6 +107,7 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 			try {
 				var timeout = this.timeout | 0;
 				this._completed = false;
+				has("ti-instrumentation") && (this._requestInstrumentationTest = instrumentation.startTest("HTTP Request")),
 				args = is(args, "Object") ? lang.urlEncode(args) : args;
 				args && this._xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 				this._xhr.send(args);
@@ -116,8 +117,8 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 						this.abort();
 						!this._completed && this._onError("Request timed out");
 					}
-				}, timeout)));
-			} catch (ex) {console.debug(ex)}
+				}), timeout));
+			} catch (ex) {}
 		},
 
 		setRequestHeader: function(name, value) {

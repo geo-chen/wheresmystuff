@@ -10,7 +10,7 @@ var require = {
 		deployType: "development",
 		description: "not specified",
 		guid: "1a7ab248-289d-4120-8d85-aa6a8ca5bb39",
-		id: "WheresMyStuff",
+		id: "com.fantastic4.wheresmystuff",
 		name: "WheresMyStuff",
 		names: {},
 		publisher: "andrew",
@@ -38,7 +38,10 @@ var require = {
 		},
 		"opera": typeof opera === "undefined" || opera.toString() != "[object Opera]",
 		"ti-analytics-use-xhr": false,
-		"ti-show-errors": true
+		"ti-show-errors": true,
+		"ti-instrumentation": function(g) {
+				return false && g.instrumentation;
+		}
 	},
 	locales: ["en", "ja"],
 	packages: [{"location": "./titanium", "main": "./Ti", "name": "Ti"}],
@@ -47,13 +50,13 @@ var require = {
 		name: "WheresMyStuff"
 	},
 	ti: {
-		buildHash: "2ff31a3",
-		buildDate: "05/30/12 10:21",
+		buildHash: "ed7f777",
+		buildDate: "08/24/12 14:46",
 		filesystem: {
 			registry: "ondemand"
 		},
 		theme: "default",
-		version: "2.0.2.GA"
+		version: "2.1.2.GA"
 	},
 	vendorPrefixes: {
 		css: ["", "-webkit-", "-moz-", "-ms-", "-o-", "-khtml-"],
@@ -82,38 +85,34 @@ var require = {
 
 	"use strict";
 
-	var // misc variables
-		x,
-		odp,
-		doc = global.document,
-		el = doc.createElement("div"),
+	var w, x, y, z,
 
 		// cached useful regexes
-		commentRegExp = /(\/\*([\s\S]*?)\*\/|\/\/(.*)$)/mg,
-		cjsRequireRegExp = /[^.]require\(\s*["']([^'"\s]+)["']\s*\)/g,
 		reservedModuleIdsRegExp = /exports|module/,
 		pluginRegExp = /^(.+?)\!(.*)$/,
-		notModuleRegExp = /(^\/)|(\:)|(\.js$)/,
+		notModuleRegExp = /\:|^\/\/|\.js$/,
 		relativeRegExp = /^\./,
+		absoluteRegExp = /^\.\./,
+		startingSlashRegExp = /^\//,
+		endingSlashRegExp = /\/$/,
 		packageNameRegExp = /([^\/]+)\/?(.*)/,
 		urlRegExp = /^url\:(.+)/,
+		jsFileRegExp = /\.js$/,
 
 		// the global config settings
 		cfg = global.require || {},
 
-		// shortened packagePaths variable
-		pp = cfg.packagePaths || {},
-
 		// the number of seconds to wait for a script to load before timing out
 		waitSeconds = (cfg.waitSeconds || 7) * 1000,
 
+		// a base url to be prepended to all urls
 		baseUrl = cfg.baseUrl || "./",
+
+		// a timeout to fetch a remote resource, defaults to 2 seconds
+		timeout = cfg.timeout || 2000,
 
 		// CommonJS paths
 		paths = cfg.paths || {},
-
-		// feature detection results initialize by pre-calculated tests
-		hasCache = cfg.hasCache || {},
 
 		// a queue of module definitions to evaluate once a module has loaded
 		defQ = [],
@@ -128,6 +127,14 @@ var require = {
 		// map of package names to package resource definitions
 		packages = {},
 
+		// module states
+		// default state unloaded = 0
+		REQUESTED = 1, // module is being downloaded
+		LOADED    = 2, // module is downloaded, but not executing/executed
+		EXECUTING = 3, // module is resolving dependencies and being evaluated
+		EXECUTED  = 4, // module is fully executed
+		BADMODULE = 5, // module errored out
+
 		// map of module ids to module resource definitions that are being loaded and processed
 		waiting = {},
 
@@ -141,38 +148,25 @@ var require = {
 	 * Utility functions
 	 *****************************************************************************/
 
-	function _mix(dest, src) {
-		for (var p in src) {
-			src.hasOwnProperty(p) && (dest[p] = src[p]);
-		}
-		return dest;
-	}
+	function noop() {}
 
 	function mix(dest) {
 		// summary:
 		//		Copies properties by reference from a source object to a destination
 		//		object, then returns the destination object. To be clear, this will
 		//		modify the dest being passed in.
-		var i = 1;
+		var i = 1,
+			l = arguments.length,
+			p,
+			src;
 		dest || (dest = {});
-		while (i < arguments.length) {
-			_mix(dest, arguments[i++]);
+		while (i < l) {
+			src = arguments[i++];
+			for (p in src) {
+				src.hasOwnProperty(p) && (dest[p] = src[p]);
+			}
 		}
 		return dest;
-	}
-
-	function each(a, fn) {
-		// summary:
-		//		Loops through each element of an array and passes it to a callback
-		//		function.
-		var i = 0,
-			l = (a && a.length) || 0,
-			args = Array.prototype.slice.call(arguments, 0);
-		args.shift();
-		while (i < l) {
-			args[0] = a[i++];
-			fn.apply(null, args);
-		}
 	}
 
 	function is(it, type) {
@@ -183,12 +177,11 @@ var require = {
 		// returns:
 		//		Boolean if type is passed in
 		//		String of type if type is not passed in
-		var t = it === void 0 ? "" : ({}).toString.call(it),
-			m = t.match(/^\[object (.+)\]$/),
-			v = m ? m[1] : "Undefined";
+		var t = Object.prototype.toString.call(it),
+			v = it === void 0 ? "Undefined" : t.substring(8, t.length - 1);
 		return type ? type === v : v;
 	}
-	
+
 	function isEmpty(it) {
 		// summary:
 		//		Checks if an object is empty.
@@ -226,7 +219,7 @@ var require = {
 				vars.push(i + "=__vars." + i);
 				vals.push(i + ":" + i);
 			}
-			r = (new Function("__vars", (vars.length ? "var " + vars.join(',') + ";\n" : "") + code + "\n;return {" + vals.join(',') + "};"))(sandboxVariables);
+			r = (new Function("__vars", (vars.length ? "var " + vars.join(',') + ";\n" : '') + code + "\n;return {" + vals.join(',') + "};"))(sandboxVariables);
 		}
 
 		// if the last line of a module is a console.*() call, Firebug for some reason
@@ -234,7 +227,7 @@ var require = {
 		return r === "_firebugIgnore" ? null : r;
 	}
 
-	function compactPath(path) {
+	function collapsePath(path) {
 		var result = [],
 			segment,
 			lastSegment;
@@ -250,48 +243,6 @@ var require = {
 		}
 		return result.join("/");
 	}
-
-	/******************************************************************************
-	 * has() feature detection
-	 *****************************************************************************/
-
-	function has(name) {
-		// summary:
-		//		Determines of a specific feature is supported.
-		//
-		// name: String
-		//		The name of the test.
-		//
-		// returns: Boolean (truthy/falsey)
-		//		Whether or not the feature has been detected.
-
-		if (is(hasCache[name], "Function")) {
-			hasCache[name] = hasCache[name](global, doc, el);
-		}
-		return hasCache[name];
-	}
-
-	has.add = function(name, test, now, force){
-		// summary:
-		//		Adds a feature test.
-		//
-		// name: String
-		//		The name of the test.
-		//
-		// test: Function
-		//		The function that tests for a feature.
-		//
-		// now: Boolean?
-		//		If true, runs the test immediately.
-		//
-		// force: Boolean?
-		//		If true, forces the test to override an existing test.
-
-		if (hasCache[name] === void 0 || force) {
-			hasCache[name] = test;
-		}
-		return now && has(name);
-	};
 
 	/******************************************************************************
 	 * Event handling
@@ -362,11 +313,49 @@ var require = {
 	};
 
 	/******************************************************************************
+	 * Promise
+	 *****************************************************************************/
+
+	function Promise() {
+		this.thens = arguments.length ? [arguments] : [];
+	}
+
+	mix(Promise.prototype, {
+
+		then: function promiseThen() {
+			this.thens.push(arguments);
+			return this;
+		},
+
+		resolve: function promiseResolve() {
+			this._complete(0, arguments);
+		},
+
+		reject: function promiseReject(ex) {
+			this._complete(1, ex instanceof Error ? ex : new Error(ex));
+		},
+
+		_complete: function promiseComplete(fnIdx, result) {
+			this.then = fnIdx ? function promiseCompleteReject(resolved, rejected) { rejected && rejected(result); }
+			                   : function promiseCompleteResolve(resolved) { resolved && resolved.apply(null, result); };
+			this._complete = noop;
+
+			for (var i = 0, thens = this.thens, len = thens.length, fn; i < len;) {
+				fn = thens[i++][fnIdx];
+				fn && fn[fnIdx ? "call" : "apply"](null, result);
+			}
+
+			delete this.thens;
+		}
+
+	});
+
+	/******************************************************************************
 	 * Configuration processing
 	 *****************************************************************************/
 
 	// make sure baseUrl ends with a slash
-	if (!/\/$/.test(baseUrl)) {
+	if (!endingSlashRegExp.test(baseUrl)) {
 		baseUrl += "/";
 	}
 
@@ -384,23 +373,26 @@ var require = {
 		//		Optional. A base URL to prepend to the package location
 
 		pkg = pkg.name ? pkg : { name: pkg };
-		pkg.location = (/(^\/)|(\:)/.test(dir) ? dir : "") + (pkg.location || pkg.name);
-		pkg.main = (pkg.main || "main").replace(/(^\.\/)|(\.js$)/, "");
+		pkg.location = (/^\/\/|\:/.test(dir) ? dir : '') + (pkg.location || pkg.name);
+		pkg.main = (pkg.main || "main").replace(/^\.\/|\.js$/g, '');
 		packages[pkg.name] = pkg;
 	}
 
 	// first init all packages from the config
-	each(cfg.packages, configPackage);
+	if (y = cfg.packages) {
+		for (x = y.length - 1; x >= 0;) {
+			configPackage(y[x--]);
+		}
+		delete cfg.packages;
+	}
 
 	// second init all package paths and their packages from the config
-	for (x in pp) {
-		each(pp[x], configPackage, x + "/");
+	for (x in w = cfg.packagePaths) {
+		for (y = w[x], z = y.length - 1; z >= 0;) {
+			configPackage(y[z--], x + '/');
+		}
 	}
-
-	// run all feature detection tests
-	for (x in cfg.has) {
-		has.add(x, cfg.has[x], 0, true);
-	}
+	delete cfg.packagePaths;
 
 	/******************************************************************************
 	 * Module functionality
@@ -432,29 +424,31 @@ var require = {
 		// refModule: Object?
 		//		A reference map used for resolving module URLs.
 
-		var match = name && name.match(pluginRegExp),
+		var _t = this,
+			match = name && name.match(pluginRegExp),
 			isRelative = relativeRegExp.test(name),
 			notModule = notModuleRegExp.test(name),
 			exports = {},
 			pkg = null,
 			cjs,
 			i,
-			len,
 			m,
 			p,
 			url = baseUrl,
-			_t = this;
+			slice = Array.prototype.slice;
 
 		// name could be:
 		//  - a plugin		text!/some/file.html or include!/some/file.js
-		//  - a module		some/module, ../some/module
+		//  - a module		some/module, /some/module, ./some/module, ../some/module
 		//  - a js file		/some/file.js
-		//  - a url			http://www.google.com/
+		//  - a url			http://www.google.com/some/file, //google.com/some/file
 
 		_t.name = name;
 		_t.deps = deps || [];
 		_t.plugin = null;
-		_t.callbacks = [];
+		_t.rawDef = rawDef;
+		_t.state = rawDef ? LOADED : 0;
+		_t.refModule = refModule;
 
 		if (!match && (notModule || (isRelative && !refModule))) {
 			_t.url = name;
@@ -465,27 +459,41 @@ var require = {
 				_t.pluginCfg = cfg[match[1]];
 				_t.deps.push(match[1]);
 			} else if (name) {
-				name = _t.name = compactPath((isRelative ? refModule.name + "/../" : "") + name);
+				name = (isRelative ? refModule.name + "/../" : '') + name.replace(startingSlashRegExp, '');
 
-				if (relativeRegExp.test(name)) {
-					throw new Error("Irrational path \"" + name + "\"");
+				if (absoluteRegExp.test(name)) {
+					throw new Error('Irrational path "' + name + '"');
 				}
 
-				if (match = name.match(packageNameRegExp)) {
-					for (i = 0, len = cfg.packages.length, m = match[1]; i < len; i++) {
-						p = cfg.packages[i];
-						if (p.name === m) {
-							pkg = m;
-							/\/$/.test(i = p.location) || (i += '/');
-							url += compactPath(i + (match[2] ? name : p.main));
-							break;
-						}
+				match = name.match(packageNameRegExp);
+				m = match && match[1];
+
+				if (m) {
+					p = packages[m];
+					if (!p && pkg === null && refModule) {
+						p = packages[m = refModule.pkg];
+						isRelative || (match[2] = name);
+					}
+					if (p) {
+						// module is a package
+						pkg = m;
+						endingSlashRegExp.test(i = p.location) || (i += '/');
+						m = match[2];
+						url += collapsePath(i + (m ? (p.root ? m : name) : p.main));
+						m || (name = pkg + '/' + p.main);
+					} else if (p = paths[m]) {
+						// module is a path
+						pkg = '';
+						// currently we only support a single path
+						url = is(p, "Array") ? p[0] : p;
 					}
 				}
 
+				_t.name = name = collapsePath(name);
+
 				// MUST set pkg to anything other than null, even if this module isn't in a package
-				if (!pkg || (!match && notModule)) {
-					pkg = "";
+				if (pkg === null || (!match && notModule)) {
+					pkg = '';
 					url += name;
 				}
 
@@ -494,19 +502,19 @@ var require = {
 		}
 
 		_t.pkg = pkg;
-		_t.rawDef = rawDef;
-		_t.loaded = !!rawDef;
-		_t.refModule = refModule;
 
 		// our scoped require()
 		function scopedRequire() {
-			var args = Array.prototype.slice.call(arguments, 0);
-			args.length > 1 || (args[1] = 0);
-			args[2] = _t;
-			return req.apply(null, args);
+			var args = slice.call(arguments, 0);
+			return req.apply(null, [
+				args[0],
+				args[1] || 0,
+				args[2] || 0,
+				_t
+			]);
 		}
-		scopedRequire.toUrl = function() {
-			var args = Array.prototype.slice.call(arguments, 0);
+		scopedRequire.toUrl = function scopedToUrl() {
+			var args = slice.call(arguments, 0);
 			_t.plugin === null && (args[1] = _t);
 			return toUrl.apply(null, args);
 		};
@@ -523,42 +531,55 @@ var require = {
 		};
 	}
 
-	ResourceDef.prototype.load = function(sync, callback) {
+	ResourceDef.prototype.load = function load(sync) {
 		// summary:
 		//		Retreives a remote script and inject it either by XHR (sync) or attaching
-		//		a script tag to the DOM (async).
+		//		a script tag to the DOM (async). Once the resource is loaded, it will be
+		//		executed.
 		//
 		// sync: Boolean
 		//		If true, uses XHR, otherwise uses a script tag.
-		//
-		// callback: Function?
-		//		A function to call when sync is false and the script tag loads.
 
 		var s,
-			x,
+			xhr,
+			scriptTag,
 			scriptTagLoadEvent,
 			scriptTagErrorEvent,
+			doc = global.document,
 			_t = this,
 			name = _t.name,
-			cached = defCache[name];
+			cached = defCache[name],
+			promise = _t.promise = (_t.promise || new Promise),
+			timer;
 
-		function fireCallbacks() {
-			each(_t.callbacks, function(c) { c(_t); });
-			_t.callbacks = [];
+		function cleanup() {
+			clearTimeout(timer);
+			if (xhr) {
+				xhr.abort();
+			}
+			if (scriptTag) {
+				scriptTagLoadEvent();
+				scriptTagErrorEvent();
+				scriptTag.parentNode.removeChild(scriptTag);
+			}
 		}
 
-		function onLoad(rawDef) {
-			_t.loaded = 1;
+		function onload(rawDef) {
+			cleanup();
+			_t.state = EXECUTING;
+
+			// if rawDef is undefined, then we're loading async
 			if (_t.rawDef = rawDef) {
 				if (is(rawDef, "String")) {
-					// if rawDef is a string, then it's either a cached string or xhr response
-					if (/\.js$/.test(_t.url)) {
+					// if rawDef is a string, then it's either a cached string or xhr response.
+					// the string could contain an AMD module or CommonJS module
+					if (jsFileRegExp.test(_t.url)) {
 						rawDef = evaluate(rawDef, _t.cjs);
 						_t.def = _t.rawDef = !isEmpty(rawDef.exports) ? rawDef.exports : (rawDef.module && !isEmpty(rawDef.module.exports) ? rawDef.module.exports : null);
 						_t.def === null && (_t.rawDef = rawDef);
 					} else {
 						_t.def = rawDef;
-						_t.executed = 1;
+						_t.state = EXECUTED;
 					}
 				} else if (is(rawDef, "Function")) {
 					// if rawDef is a function, then it's a cached module definition
@@ -566,108 +587,109 @@ var require = {
 					rawDef();
 				}
 			}
-			processDefQ(_t);
-			fireCallbacks();
-			return 1;
+
+			// we need to process the definition queue just in case the rawDef fired define()
+			processDefQ(_t) || _t.execute();
 		}
 
-		_t.sync = sync;
-		callback && _t.callbacks.push(callback);
-
-		// if we don't have a url, then I suppose we're loaded
-		if (_t.executed || !_t.url) {
-			_t.loaded = 1;
-			fireCallbacks();
-			return;
-		}
-
-		// if we're already waiting, then we can just return and our callback will be fired
-		if (waiting[name]) {
-			return;
-		}
-
-		// if we're already loaded or the definition has been cached, then just return now
-		if (_t.loaded || cached) {
-			delete defCache[name];
-			return onLoad(cached);
-		}
-
-		// mark this module as waiting to be loaded so that anonymous modules can be
-		// identified
-		waiting[name] = _t;
-
-		function disconnect() {
-			scriptTagLoadEvent && scriptTagLoadEvent();
-			scriptTagErrorEvent && scriptTagErrorEvent();
-		}
-
-		function failed() {
+		function onfail(msg) {
+			cleanup();
 			modules[name] = 0;
 			delete waiting[name];
-			disconnect();
+			_t.state = BADMODULE;
+			promise.reject('Failed to load module "'+ name + '"' + (msg ? ': ' + msg : ''));
 		}
 
-		if (sync) {
-			x = new XMLHttpRequest();
-			x.open("GET", _t.url, false);
-			x.send(null);
+		// if we don't have a url, then I suppose we're loaded
+		if (_t.state === EXECUTED || !_t.url) {
+			_t.execute();
 
-			if (x.status === 200) {
-				return onLoad(x.responseText);
+		// if we're not executing and not already waiting, then fetch the module
+		} else if (_t.state !== EXECUTING && !waiting[name]) {
+
+			// if the definition has been cached, no need to load it
+			if (_t.state === LOADED || cached) {
+				delete defCache[name];
+				onload(cached);
+
 			} else {
-				failed();
-				throw new Error("Failed to load module \"" + name + "\": " + x.status);
-			}
-		} else {
-			// insert the script tag, attach onload, wait
-			x = _t.node = doc.createElement("script");
-			x.type = "text/javascript";
-			x.charset = "utf-8";
-			x.async = true;
+				// mark this module as waiting to be loaded so that anonymous modules can be identified
+				waiting[name] = _t;
+				_t.state = REQUESTED;
 
-			scriptTagLoadEvent = on(x, "load", function(e) {
-				e = e || global.event;
-				var node = e.target || e.srcElement;
-				if (e.type === "load" || /complete|loaded/.test(node.readyState)) {
-					disconnect();
-					onLoad();
+				timeout && (timer = setTimeout(function() {
+					onfail("request timed out");
+				}, timeout));
+
+				if (_t.sync = sync) {
+					xhr = new XMLHttpRequest;
+					xhr.open("GET", _t.url, false);
+					xhr.send(null);
+
+					if (xhr.status === 200) {
+						onload(xhr.responseText);
+					} else {
+						onfail(xhr.status);
+					}
+				} else {
+					// insert the script tag, attach onload, wait
+					scriptTag = _t.node = doc.createElement("script");
+					scriptTag.type = "text/javascript";
+					scriptTag.charset = "utf-8";
+					scriptTag.async = true;
+
+					scriptTagLoadEvent = on(scriptTag, "load", function onScriptTagLoad(e) {
+						e = e || global.event;
+						var node = e.target || e.srcElement;
+						if (e.type === "load" || /complete|loaded/.test(node.readyState)) {
+							scriptTagLoadEvent();
+							scriptTagErrorEvent();
+							onload();
+						}
+					});
+
+					scriptTagErrorEvent = on(scriptTag, "error", function() {
+						onfail();
+					});
+
+					// set the source url last
+					scriptTag.src = _t.url;
+
+					s = doc.getElementsByTagName("script")[0];
+					s.parentNode.insertBefore(scriptTag, s);
 				}
-			});
-
-			scriptTagErrorEvent = on(x, "error", failed);
-
-			// set the source url last
-			x.src = _t.url;
-
-			s = doc.getElementsByTagName("script")[0];
-			s.parentNode.insertBefore(x, s);
+			}
 		}
+
+		return promise;
 	};
 
-	ResourceDef.prototype.execute = function(callback) {
+	ResourceDef.prototype.execute = function execute() {
 		// summary:
 		//		Executes the resource's rawDef which defines the module.
-		//
-		// callback: Function?
-		//		A function to call after the module has been executed.
 
-		var _t = this;
+		var _t = this,
+			promise = _t.promise = (_t.promise || new Promise),
+			resolve = promise.resolve;
 
-		if (_t.executed) {
-			callback && callback();
+		if (_t.state === EXECUTED) {
+			resolve.call(promise, _t);
 			return;
 		}
 
 		// first need to make sure we have all the deps loaded
-		fetch(_t, function(deps) {
+		req(_t, function onExecuteDepsLoaded() {
 			var i,
 				p,
 				r = _t.rawDef,
-				q = defQ.slice(0), // backup the defQ
-				finish = function() {
-					_t.executed = 1;
-					callback && callback();
-				};
+				q = defQ.slice(0); // backup the defQ
+
+			function finish() {
+				_t.state = EXECUTED;
+				delete _t.deps;
+				delete _t.rawDef;
+				resolve.call(promise, _t);
+			}
 
 			// need to wipe out the defQ
 			defQ = [];
@@ -676,7 +698,7 @@ var require = {
 				||	(r && (is(r, "String")
 						? evaluate(r, _t.cjs)
 						: is(r, "Function")
-							? r.apply(null, deps)
+							? r.apply(null, arguments)
 							: is(r, "Object")
 								?	(function(obj, vars) {
 										for (var i in vars) {
@@ -689,17 +711,15 @@ var require = {
 					)
 				|| _t.cjs.module.exports || _t.cjs.exports;
 
-			// we might have just executed code above that could have caused a couple
-			// define()'s to queue up
+			// we might have just executed code above that could have caused a couple define()'s to queue up
 			processDefQ(_t);
 
 			// restore the defQ
 			defQ = q;
 
-			// if plugin is not null, then it's the index in the deps array of the plugin
-			// to invoke
+			// if plugin is not null, then it's the index in the deps array of the plugin to invoke
 			if (_t.plugin !== null) {
-				p = deps[_t.plugin];
+				p = arguments[_t.plugin];
 
 				// the plugin's content is dynamic, so just remove from the module cache
 				if (p.dynamic) {
@@ -707,13 +727,15 @@ var require = {
 				}
 
 				// if the plugin has a load function, then invoke it!
-				p.load && p.load(_t.pluginArgs, _t.cjs.require, function(v) {
+				p.load && p.load(_t.pluginArgs, _t.cjs.require, function onPluginRun(v) {
 					_t.def = v;
 					finish();
 				}, _t.pluginCfg);
 			}
 
 			(p && p.load) || finish();
+		}, function(ex) {
+			promise.reject(ex);
 		}, _t.refModule, _t.sync);
 	};
 
@@ -726,11 +748,11 @@ var require = {
 
 		if (refModule && refModule.cjs && name in refModule.cjs) {
 			module.def = refModule.cjs[name];
-			module.loaded = module.executed = 1;
-			return module;
+			module.state = EXECUTED;
+			dontCache = 1;
 		}
 
-		return dontCache || !moduleName ? module : (!modules[moduleName] || !modules[moduleName].executed || overrideCache ? (modules[moduleName] = module) : modules[moduleName]);
+		return dontCache || !moduleName ? module : (!modules[moduleName] || !modules[moduleName].state || overrideCache ? (modules[moduleName] = module) : modules[moduleName]);
 	}
 
 	function processDefQ(module) {
@@ -743,7 +765,8 @@ var require = {
 		//		be sitting in the defQ waiting to be executed.
 
 		var m,
-			q = defQ.slice(0);
+			q = defQ.slice(0),
+			r = 0;
 		defQ = [];
 
 		while (q.length) {
@@ -759,6 +782,7 @@ var require = {
 				module.rawDef = m.rawDef;
 				module.refModule = m.refModule;
 				module.execute();
+				r = 1;
 			} else {
 				modules[m.name] = m;
 				m.execute();
@@ -766,66 +790,7 @@ var require = {
 		}
 
 		delete waiting[module.name];
-	}
-
-	function fetch(deps, callback, refModule, sync) {
-		// summary:
-		//		Fetches all dependents and fires callback when finished or on error.
-		//
-		// description:
-		//		The fetch() function will fetch each of the dependents either
-		//		synchronously or asynchronously (default).
-		//
-		// deps: String | Array | Object
-		//		A string or array of module ids to load or a resource definition.
-		//
-		// callback: Function?
-		//		A callback function fired once the loader successfully loads and evaluates
-		//		all dependent modules. The function is passed an ordered array of
-		//		dependent module definitions.
-		//
-		// refModule: Object?
-		//		A reference map used for resolving module URLs.
-		//
-		// sync: Boolean?
-		//		Forces the async path to be sync.
-		//
-		// returns: Object | Function
-		//		If deps is a string, then it returns the corresponding module definition,
-		//		otherwise the require() function.
-
-		var i,
-			l,
-			count,
-			type = is(deps),
-			s = type === "String";
-
-		if (type === "Object") {
-			refModule = deps;
-			deps = refModule.deps;
-		}
-
-		if (s) {
-			deps = [deps];
-			sync = 1;
-		}
-
-		for (i = 0, l = count = deps.length; i < l; i++) {
-			deps[i] && (function(idx) {
-				getResourceDef(deps[idx], refModule).load(!!sync, function(m) {
-					m.execute(function() {
-						deps[idx] = m.def;
-						if (--count === 0) {
-							callback(deps);
-							count = -1; // prevent success from being called the 2nd time below
-						}
-					});
-				});
-			}(i));
-		}
-
-		count === 0 && callback(deps);
-		return s ? deps[0] : deps;
+		return r;
 	}
 
 	function def(name, deps, rawDef) {
@@ -955,12 +920,11 @@ var require = {
 		//		|		};
 		//		|	});
 
-		var i = ["require"],
+		var i = ["require", "exports", "module"],
 			module;
 
 		if (!rawDef) {
 			rawDef = deps || name;
-			rawDef.length === 1 || (i = i.concat(["exports", "module"]));
 			if (typeof name !== "string") {
 				deps = deps ? name : i;
 				name = 0;
@@ -970,17 +934,7 @@ var require = {
 		}
 
 		if (reservedModuleIdsRegExp.test(name)) {
-			throw new Error("Not allowed to define reserved module id \"" + name + "\"");
-		}
-
-		if (is(rawDef, "Function") && arguments.length === 1) {
-			// treat rawDef as CommonJS definition and scan for any requires and add
-			// them to the dependencies so that they can be loaded and passed in.
-			rawDef.toString()
-				.replace(commentRegExp, "")
-				.replace(cjsRequireRegExp, function(match, dep) {
-					deps.push(dep);
-				});
+			throw new Error('Not allowed to define reserved module id "' + name + '"');
 		}
 
 		module = getResourceDef(name, 0, deps, rawDef, 0, 1);
@@ -1030,16 +984,16 @@ var require = {
 			url = module.url;
 
 		module.pkg !== null && (url = url.substring(0, url.length - 3));
-		return url + ((match && match[2]) || "");
+		return url + ((match && match[2]) || '');
 	}
 
-	function req(deps, callback, refModule) {
+	function req(deps, callback, errback, refModule, sync) {
 		// summary:
 		//		Fetches a module, caches its definition, and returns the module. If an
 		//		array of modules is specified, then after all of them have been
 		//		asynchronously loaded, an optional callback is fired.
 		//
-		// deps: String | Array
+		// deps: String | Array | Object
 		//		A string or array of strings containing valid module identifiers.
 		//
 		// callback: Function?
@@ -1049,12 +1003,12 @@ var require = {
 		// refModule: Object?
 		//		A reference map used for resolving module URLs.
 		//
-		// returns: Object | Function
-		//		If calling with a string, it will return the corresponding module
-		//		definition.
+		// sync: Boolean?
+		//		Forces the async path to be sync.
 		//
-		//		If calling with an array of dependencies and a callback function, the
-		//		require() function returns itself.
+		// returns: Object | Promise
+		//		If calling with a string, it will return the corresponding module
+		//		definition, otherwise it returns a Promise for the async loading.
 		//
 		// example:
 		//		Synchronous call.
@@ -1066,23 +1020,54 @@ var require = {
 		//		|		convert(arithmetic.sq(10), "fahrenheit", "celsius"); // returns 37.777
 		//		|	});
 
-		return fetch(deps, function(deps) {
-			callback && callback.apply(null, deps);
-		}, refModule) || req;
+		var i = 0,
+			l,
+			counter,
+			errorCount = 0,
+			type = is(deps),
+			s = type === "String",
+			promise = new Promise(callback, errback);
+
+		if (type === "Object") {
+			refModule = deps;
+			deps = refModule.deps || [];
+		}
+
+		if (s) {
+			deps = [deps];
+			sync = 1;
+		}
+
+		for (l = counter = deps.length; i < l;) {
+			(function requireDepClosure(j) {
+				function finish(m) {
+					deps[j] = m instanceof Error && ++errorCount ? void 0 : m.def;
+					if (--counter === 0) {
+						errorCount ? promise.reject(m) : promise.resolve.apply(promise, deps);
+						counter = -1; // prevent success from being called the 2nd time below
+					}
+				}
+
+				deps[j] && getResourceDef(deps[j], refModule).load(sync).then(finish, finish);
+			}(i++));
+		}
+
+		counter === 0 && promise.resolve.apply(promise, deps);
+
+		return s ? deps[0] : promise;
 	}
 
 	req.toUrl = toUrl;
 	mix(req, fnMixin = {
 		config: cfg,
-		each: each,
 		evaluate: evaluate,
-		has: has,
 		is: is,
 		mix: mix,
-		on: on
+		on: on,
+		Promise: Promise
 	});
 
-	req.cache = function(subject) {
+	req.cache = function requireCache(subject) {
 		// summary:
 		//		Copies module definitions into the definition cache.
 		//
@@ -1135,7 +1120,8 @@ var require = {
 	global.require = req;
 	global.define = def;
 
-}(window));require.cache({
+}(window));
+require.cache({
 "Ti/Codec":function(){
 /* /titanium/Ti/Codec.js */
 
@@ -1304,86 +1290,60 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/UI"],
 
 define(["Ti/_/Evented", "Ti/_/lang", "Ti/UI/MobileWeb/NavigationGroup"],
 	function(Evented, lang, NavigationGroup) {
-	
+
 	return lang.setObject("Ti.UI.MobileWeb", Evented, {
 		createNavigationGroup: function(args) {
 			return new NavigationGroup(args);
 		}
 	});
-	
+
 });
 },
 "Ti/UI/Switch":function(){
 /* /titanium/Ti/UI/Switch.js */
 
-define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/_/lang", "Ti/UI"],
-	function(declare, FontWidget, dom, css, style, lang, UI) {
+define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/css", "Ti/_/style", "Ti/UI"],
+	function(declare, FontWidget, css, style, UI) {
 
 	var setStyle = style.set,
 		postDoBackground = {
-			post: "_updateLook"
-		},
-        unitize = dom.unitize;
+			post: function() {
+				if (this.backgroundColor || this.backgroundDisabledColor || this.backgroundDisabledImage || this.backgroundFocusedColor || 
+					this.backgroundFocusedImage || this.backgroundImage || this.backgroundSelectedColor || this.backgroundSelectedImage) {
+					this._clearDefaultLook();
+				} else {
+					this._setDefaultLook();
+				}
+				this._doBackground();
+			}
+		};
 
 	return declare("Ti.UI.Switch", FontWidget, {
 
 		constructor: function(args) {
 			
-			// This container holds the flex boxes used to position the elements
-			this._contentContainer = dom.create("div", {
-				className: "TiUISwitchContentContainer",
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxOrient: "vertical",
-					boxPack: "center",
-					boxAlign: "stretch",
-					width: "100%",
-					height: "100%"
-				}
-			}, this.domNode)
+			var contentContainer = this._contentContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.INHERIT,
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL,
+				borderColor: "transparent"
+			});
+			this._add(contentContainer);
 			
-			// Create the text box and a flex box to align it
-			this._titleContainer = dom.create("div", {
-				className: "TiUISwitchTextAligner",
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxOrient: "vertical",
-					boxPack: "center",
-					boxAlign: "center",
-					boxFlex: 1
-				}
-			}, this._contentContainer);
-			this._switchTitle = dom.create("div", {
-				className: "TiUISwitchTitle",
-				style: {
-					whiteSpace: "nowrap",
-					pointerEvents: "none",
-					textAlign: "center"
-				}
-			}, this._titleContainer);
-			this._addStyleableDomNode(this._switchTitle);
-
-			// Create the switch indicator and a flex box to contain it
-			this._indicatorContainer = dom.create("div", {
-				className: "TiUISwitchTextAligner",
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxPack: "center",
-					boxAlign: "center",
-					marginTop: "3px"
-				}
-			}, this._contentContainer);
-			this._switchIndicator = dom.create("div", {
-				className: "TiUISwitchIndicator",
-				style: {
-					padding: "4px 4px",
-					borderRadius: "4px",
-					border: "1px solid #888",
-					pointerEvents: "none",
-					width: "40px"
-				}
-			}, this._indicatorContainer);
-			this._switchIndicator.domNode += " TiUISwitchIndicator";
+			contentContainer._add(this._switchTitle = UI.createLabel({
+				width: UI.INHERIT,
+				height: UI.INHERIT,
+				verticalAlign: UI.TEXT_VERTICAL_ALIGNMENT_CENTER,
+				textAlign: UI.TEXT_ALIGNMENT_CENTER
+			}));
+			
+			contentContainer._add(this._switchIndicator = UI.createView({
+				width: 40,
+				height: 10,
+				borderRadius: 4,
+				borderWidth: 1,
+				borderColor: "#888"
+			}));
 			
 			// Set the default look
 			this._setDefaultLook();
@@ -1394,55 +1354,28 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			
 			this.value = false;
 		},
-		
-		_updateLook: function() {
-			if (this.backgroundColor || this.backgroundDisabledColor || this.backgroundDisabledImage || this.backgroundFocusedColor || 
-				this.backgroundFocusedImage || this.backgroundImage || this.backgroundSelectedColor || this.backgroundSelectedImage) {
-				this._clearDefaultLook();
-			} else {
-				this._setDefaultLook();
-			}
-			this._doBackground();
-		},
-		
+
 		_setDefaultLook: function() {
 			if (!this._hasDefaultLook) {
 				this._hasDefaultLook = true;
-				css.add(this.domNode, "TiUIElementGradient");
 				this._previousBorderWidth = this.borderWidth;
 				this._previousBorderColor = this.borderColor;
-				this.borderWidth = 1;
-				this.borderColor = "#666";
-				setStyle(this.domNode, { 
-					borderRadius: "6px",
-					padding: "6px 6px"
-				});
+				css.add(this.domNode, "TiUIElementGradient");
+				css.add(this.domNode, "TiUIButtonDefault");
+				this._contentContainer.borderWidth = 6;
+				this._getBorderFromCSS();
 			}
 		},
 		
 		_clearDefaultLook: function() {
 			if (this._hasDefaultLook) {
 				this._hasDefaultLook = false;
-				var className = this.domNode.className;
-				css.remove(this.domNode, "TiUIElementGradient");
 				this.borderWidth = this._previousBorderWidth;
 				this.borderColor = this._previousBorderColor;
-				setStyle(this.domNode, { 
-					borderRadius: "",
-					padding: ""
-				});
+				css.remove(this.domNode, "TiUIElementGradient");
+				css.remove(this.domNode, "TiUIButtonDefault");
+				this._contentContainer.borderWidth = 0;
 			}
-		},
-		
-		_getContentSize: function(width, height) {
-			var defaultLookOffset = (this._hasDefaultLook ? 12 : 0);
-			return {
-				width: Math.max(this._measureText(this._switchTitle.innerHTML, this._switchTitle).width, this._switchIndicator.offsetWidth) + defaultLookOffset,
-				height: this._measureText(this._switchTitle.innerHTML, this._switchTitle).height + // Text height
-						this._switchIndicator.offsetHeight + // Indicator height
-						3 + // Padding between the indicator and text
-						defaultLookOffset // Border of the default style
-			};
 		},
 		
 		_defaultWidth: UI.SIZE,
@@ -1490,13 +1423,7 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			
 			textAlign: {
 				set: function(value) {
-					var cssValue = "";
-					switch(value) {
-						case UI.TEXT_VERTICAL_ALIGNMENT_TOP: cssValue = "start"; break;
-						case UI.TEXT_VERTICAL_ALIGNMENT_CENTER: cssValue = "center"; break;
-						case UI.TEXT_VERTICAL_ALIGNMENT_BOTTOM: cssValue = "end"; break;
-					}
-					setStyle(this._titleContainer, "boxAlign", cssValue);
+					this._switchTitle.textAlign = value;
 					return value;
 				}
 			},
@@ -1504,8 +1431,7 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			titleOff: {
 				set: function(value) {
 					if (!this.value) {
-						this._switchTitle.innerHTML = value;
-						this._hasSizeDimensions() && this._triggerLayout();
+						this._switchTitle.text = value;
 					}
 					return value;
 				},
@@ -1515,8 +1441,7 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			titleOn: {
 				set: function(value) {
 					if (this.value) {
-						this._switchTitle.innerHTML = value;
-						this._hasSizeDimensions() && this._triggerLayout();
+						this._switchTitle.text = value;
 					}
 					return value;
 				},
@@ -1525,12 +1450,9 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			
             value: {
 				set: function(value) {
-					setStyle(this._switchIndicator,{
-						backgroundColor: value ? "#0f0" : "#aaa"
-					});
+					this._switchIndicator.backgroundColor = value ? "#0f0" : "#aaa";
 					value = !!value;
-					this._switchTitle.innerHTML = value ? this.titleOn : this.titleOff;
-					this._hasSizeDimensions() && this._triggerLayout();
+					this._switchTitle.text = value ? this.titleOn : this.titleOff;
 					return value;
 				},
 				post: function() {
@@ -1542,13 +1464,7 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			
 			verticalAlign: {
 				set: function(value) {
-					var cssValue = "";
-					switch(value) {
-						case UI.TEXT_VERTICAL_ALIGNMENT_TOP: cssValue = "start"; break;
-						case UI.TEXT_VERTICAL_ALIGNMENT_CENTER: cssValue = "center"; break;
-						case UI.TEXT_VERTICAL_ALIGNMENT_BOTTOM: cssValue = "end"; break;
-					}
-					setStyle(this._titleContainer, "boxPack", cssValue);
+					this._switchTitle.verticalAlign = value;
 				},
 				value: UI.TEXT_VERTICAL_ALIGNMENT_CENTER
 			}
@@ -1594,10 +1510,11 @@ define(["Ti/_", "Ti/_/Evented", "Ti/_/lang"], function(_, Evented, lang) {
 "Ti/UI/ImageView":function(){
 /* /titanium/Ti/UI/ImageView.js */
 
-define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"], 
-	function(declare, lang, style, Widget, UI) {
+define(["Ti/_/declare", "Ti/_/event", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI", "Ti/Filesystem"], 
+	function(declare, event, lang, style, Widget, UI, Filesystem) {
 
 	var setStyle = style.set,
+		is = require.is,
 		on = require.on,
 		InternalImageView = declare(Widget, {
 
@@ -1616,66 +1533,69 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 				}
 			},
 
-			_doLayout: function(params) {
+			_preLayout: function(boundingWidth, boundingHeight, isParentWidthSize, isParentHeightSize) {
 				// We have to remove the old style to get the image to scale to its default size,
 				// otherwise we are just reading in whatever we set in the last doLayout(), which is
 				// 0 if the image was not loaded...thus always clamping it to 0.
 				this.domNode.style.width = "";
 				this.domNode.style.height = "";
-				
+
 				var imageRatio = this.domNode.width / this.domNode.height,
-					boundingHeight = params.boundingSize.height,
-					boundingWidth = params.boundingSize.width,
 					values = this.properties.__values__,
-					isParentWidthSize = params.isParentSize.width,
-					isParentHeightSize = params.isParentSize.height;
-
-				function setByHeight() {
-					values.width = boundingHeight * imageRatio;
-					values.height = boundingHeight;
-				}
-
-				function setByWidth() {
-					values.width = boundingWidth;
-					values.height = boundingWidth / imageRatio;
-				}
+					oldWidth = values.width,
+					oldHeight = values.height;
 
 				if (!isParentWidthSize && !isParentHeightSize) {
 					if (boundingWidth / boundingHeight > imageRatio) {
-						setByHeight();
+						values.width = boundingHeight * imageRatio;
+						values.height = boundingHeight;
 					} else {
-						setByWidth();
+						values.width = boundingWidth;
+						values.height = boundingWidth / imageRatio;
 					}
 				} else if (!isParentWidthSize) {
-					setByWidth();
+					values.width = boundingWidth;
+					values.height = boundingWidth / imageRatio;
 				} else if (!isParentHeightSize) {
-					setByHeight();
+					values.width = boundingHeight * imageRatio;
+					values.height = boundingHeight;
 				} else {
 					values.width = UI.SIZE;
 					values.height = UI.SIZE;
 				}
 
-				return Widget.prototype._doLayout.call(this,params);
+				return oldWidth !== values.width || oldHeight !== values.height;
 			},
+
+			_imageRatio: 1,
 
 			properties: {
 				src: {
 					set: function(value) {
 						var node = this.domNode,
-							disp = "none";
+							disp = "none",
+							handles,
 							onerror = lang.hitch(this, function(e) {
+								event.off(handles);
 								this._triggerLayout();
 								this.onerror && this.onerror(e);
 							});
 
 						if (value) {
 							disp = "inherit";
-							on(node, "load", this, function() {
-								this.container._triggerLayout();
-								this.onload && this.onload();
-							});
-							on(node, "error", onerror);
-							on(node, "abort", onerror);
+							handles = [
+								on(node, "load", this, function() {
+									node.style.width = "";
+									node.style.height = "";
+									var imageRatio = node.width / node.height;
+									isNaN(imageRatio) && (imageRatio = node.width === 0 ? 1 : Infinity);
+									this._imageRatio = imageRatio;
+									this._triggerLayout();
+									this.onload && this.onload();
+								}),
+								on(node, "error", onerror),
+								on(node, "abort", onerror)
+							];
 							node.src = require.cache(value) || value;
 						}
 
@@ -1689,6 +1609,8 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 	return declare("Ti.UI.ImageView", Widget, {
 
 		_createImage: function(src, onload, onerror) {
+			var m = is(src, "String") && src.match(/^(.+)\:\/\//);
+			m && ~Filesystem.protocols.indexOf(m[1]) && (src = Filesystem.getFile(src));
 			switch (src && src.declaredClass) {
 				case "Ti.Filesystem.File":
 					src = src.read();
@@ -1698,8 +1620,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 			return new InternalImageView({
 				onload: onload,
 				onerror: onerror,
-				src: src,
-				container: this
+				src: src
 			});
 		},
 
@@ -1744,7 +1665,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 
 		start: function(){
 			if (this._images) {
-				this._setState(1, 0);
+				this._setState(0, 1);
 				this._slideshowCount = 0;
 				this._setSlideshowInterval();
 				this.fireEvent("start");
@@ -1799,7 +1720,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 				set: function(value) {
 					this._removeAllChildren();
 					this._images = void 0;
-					this.add(this._createImage(value, function() {
+					this._add(this._createImage(value, function() {
 						this.fireEvent("load", {
 							state: "image"
 						});
@@ -1816,7 +1737,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 						counter = 0,
 						errored = 0;
 					this._removeAllChildren();
-					if (require.is(value, "Array")) {
+					if (is(value, "Array")) {
 						imgs = [];
 						value.forEach(function(val) {
 							var img = this._createImage(val, function() {
@@ -1828,7 +1749,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/style", "Ti/_/UI/Widget", "Ti/UI"],
 							});
 							setStyle(img.domNode, "display", "none");
 							imgs.push(img);
-							this.add(img);
+							this._add(img);
 						}, this);
 					}
 					this._images = imgs;
@@ -1958,10 +1879,10 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 							this.blocking.push("singletap");
 							this.blocking.push("doubletap");
 							this.blocking.push("longpress");
-							lang.hitch(element,element._handleTouchEvent(this.name,{
+							element._handleTouchEvent(this.name,{
 								x: (this._touchStartLocation[0].x + this._touchStartLocation[1].x) / 2,
 								y: (this._touchStartLocation[0].y + this._touchStartLocation[1].y) / 2
-							}));
+							});
 						}
 					}
 					this._touchStartLocation = null;
@@ -2135,6 +2056,10 @@ define(["Ti/_", "Ti/_/lang"], function(_, lang) {
 					a0.hasOwnProperty(i) && ((f && i in f ? f.__values__ : this)[i] = a0[i]);
 				}
 			}
+
+			this.toString === Object.prototype.toString && (this.toString = function() {
+				return "[object " + dc.replace(/\./g, '') + "]";
+			});
 
 			// 4) continue the original ritual: call the postscript
 			f = this.postscript;
@@ -2350,152 +2275,139 @@ define(function() {
 define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/_/lang", "Ti/UI"], 
 	function(declare, Widget, dom, css, style, lang, UI) {
 
-	var setStyle = style.set,
-		unitize = dom.unitize;
+	var on = require.on,
+		setStyle = style.set;
 
 	return declare("Ti.UI.Slider", Widget, {
 
 		constructor: function(args) {
-			this._track = dom.create("div", {
-				className: "TiUISliderTrack"
-			}, this.domNode);
-			
-			this._thumb = dom.create("div", {
-				className: "TiUIElementGradient TiUISliderThumb"
-			}, this.domNode);
-			
-			var initialPosition,
+			var self = this,
+				initialPosition,
 				initialValue,
-				self = this;
-			this.addEventListener("touchstart", function(e) {
+				track = self._track = dom.create("div", {
+					className: "TiUISliderTrack"
+				}, self.domNode),
+				thumb = self._thumb = dom.create("div", {
+					className: "TiUIElementGradient TiUISliderThumb"
+				}, self.domNode);
+
+			on(self, "touchstart", function(e) {
 				initialPosition = e.x;
 				initialValue = self.value;
 			});
-			this.addEventListener("touchmove", function(e) {
-				self.value = Math.round((e.x - initialPosition) * (self.max - self.min) / (self.domNode.clientWidth - 32) + initialValue);
+
+			on(self, "touchmove", function(e) {
+				self.value = (e.x - initialPosition) * (self.max - self.min) / (track.offsetWidth - thumb.offsetWidth) + initialValue;
 			});
+
+			on(self, "postlayout", self, "_updatePosition");
 		},
-		
-		_doLayout: function() {
-			var dimensions = Widget.prototype._doLayout.apply(this,arguments);
-			this._updateSize();
-			return dimensions;	
+
+		_constrainedUpdate: function(value) {
+			this.properties.__values__.value = this._constrainValue(value);
+			this._updatePosition();
 		},
-		
-		_updateSize: function() {
-			this._thumbLocation = Math.round((this.domNode.clientWidth - 32) * ((this.value - this.min) / (this.max - this.min)))
-			setStyle(this._thumb, "transform", "translateX(" + this._thumbLocation + "px)");
-		},
-		
+
 		_constrainValue: function(value) {
-			var minVal = lang.val(this.minRange, this.min),
-				maxVal = lang.val(this.maxRange, this.max);
-			value < minVal && (value = minVal);
-			value > maxVal && (value = maxVal);
-			return value;
+			return Math.min(lang.val(this.maxRange, this.max), Math.max(lang.val(this.minRange, this.min), value));
 		},
-		
+
+		_updatePosition: function() {
+			var thumb = this._thumb;
+			this._thumbLocation = Math.round((this._track.offsetWidth - thumb.offsetWidth) * ((this.value - this.min) / (this.max - this.min)))
+			setStyle(thumb, "transform", "translateX(" + this._thumbLocation + "px)");
+		},
+
 		_defaultWidth: UI.FILL,
-		
+
 		_defaultHeight: UI.SIZE,
-		
-		_getContentSize: function(width, height) {
-			// There is nothing to measure, or that has "dimensions" to return, so we just return sensible yet arbitrary defaults.
-			return {
-				width: 200,
-				height: 40
-			}
-		},
-		
+
 		_setTouchEnabled: function(value) {
-			Widget.prototype._setTouchEnabled.apply(this, arguments);
 			var cssVal = value ? "auto" : "none";
+			Widget.prototype._setTouchEnabled.call(this, value);
 			setStyle(this._track, "pointerEvents", cssVal);
 			setStyle(this._thumb, "pointerEvents", cssVal);
 		},
 
+		_handleTouchEvent: function(type, e) {
+			e.value = this.value;
+			Widget.prototype._handleTouchEvent.call(this, type, e);
+		},
+
+		_getContentSize: function() {
+			return {
+				width: 200,
+				height: 40
+			};
+		},
+
 		properties: {
-						
+			
 			enabled: {
 				set: function(value, oldValue) {
-					
 					if (value !== oldValue) {
-						if (!value) {
-							css.remove(this._thumb,"TiUIElementGradient");
-							setStyle(this._thumb,"backgroundColor","#aaa");
-						} else {
-							css.add(this._thumb,"TiUIElementGradient");
-							setStyle(this._thumb,"backgroundColor","");
-						}
+						css.remove(this._thumb, ["TiUIElementGradient", "TiUISliderThumbDisabled"]);
+						css.add(this._thumb, value ? "TiUIElementGradient" : "TiUISliderThumbDisabled");
 						this._setTouchEnabled(value);
 					}
 					return value;
 				},
 				value: true
 			},
-			
+
 			max: {
 				set: function(value) {
-					value < this.min && (value = this.min);
-					return value;
+					return Math.max(this.min, value);
 				},
-				post: function() {
-					this.value = this._constrainValue(this.value);
-					this._updateSize();
-				},
-				value: 100
+				post: "_constrainedUpdate",
+				value: 1
 			},
-			
+
 			maxRange: {
 				set: function(value) {
-					value > this.max && (value = this.max);
-					return value;
+					return Math.min(this.max, value);
 				},
-				post: function() {
-					this.value = this._constrainValue(this.value);
-					this._updateSize();
-				}
+				post: "_constrainedUpdate"
 			},
-			
+
 			min: {
 				set: function(value) {
-					value > this.max && (value = this.max);
-					return value;
+					return Math.min(this.max, value);
 				},
-				post: function() {
-					this.value = this._constrainValue(this.value);
-					this._updateSize();
-				},
+				post: "_constrainedUpdate",
 				value: 0
 			},
-			
+
 			minRange: {
 				set: function(value) {
-					value < this.min && (value = this.min);
-					return value;
+					return Math.max(this.min, value);
 				},
-				post: function() {
-					this.value = this._constrainValue(this.value);
-					this._updateSize();
-				}
+				post: "_constrainedUpdate"
 			},
-			
+
 			value: {
-				set: function(value, oldValue) {
+				set: function(value) {
 					return this._constrainValue(value);
 				},
 				post: function(value, oldValue) {
 					if (value !== oldValue) {
 						this.fireEvent("change", {
 							value: value,
-							x: -1,
-							y: -1
+							thumbOffset: {
+								x: 0,
+								y: 0
+							},
+							thumbSize: {
+								height: 0,
+								width: 0
+							}
 						});
 					}
-					this._updateSize();
+					this._updatePosition();
 				},
 				value: 0
 			}
+
 		}
 
 	});
@@ -2820,12 +2732,16 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 		
 		processTouchMoveEvent: function(e, element){
 			if (!element._isGestureBlocked(this.name)) {
-				for (var i = 0; i < e.changedTouches.length; i++) {
-					lang.hitch(element,element._handleTouchEvent(this.name,{
-						x: e.changedTouches[i].clientX,
-						y: e.changedTouches[i].clientY,
-						source: this.getSourceNode(e,element)
-					}));
+				var changed = e.changedTouches,
+					i = 0,
+					l = changed.length,
+					src = this.getSourceNode(e, element);
+				for (; i < l; i++) {
+					element._handleTouchEvent(this.name, {
+						x: changed[i].clientX,
+						y: changed[i].clientY,
+						source: src
+					});
 				}
 			}
 		}
@@ -2837,99 +2753,391 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 "Ti/_/Layouts/Horizontal":function(){
 /* /titanium/Ti/_/Layouts/Horizontal.js */
 
-define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/UI"], function(Base, declare, UI) {
+define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/API", "Ti/UI", "Ti/_/lang", "Ti/_/style"],
+	function(Base, declare, API, UI, lang, style) {
+
+	var isDef = lang.isDef,
+		setStyle = style.set,
+		round = Math.round,
+		floor = Math.floor,
+		ceil = Math.ceil;
 
 	return declare("Ti._.Layouts.Horizontal", Base, {
 
 		_doLayout: function(element, width, height, isWidthSize, isHeightSize) {
-			var computedSize = this._computedSize = {width: 0, height: 0},
-				currentLeft = 0,
-				children = element.children,
-				availableWidth = width,
-				childrenWithFillWidth = false;
+			var computedSize = {width: 0, height: 0},
+				children = element._children,
+				child,
+				i = 0, j,
+				layoutCoefficients, 
+				widthLayoutCoefficients, heightLayoutCoefficients, sandboxWidthLayoutCoefficients, sandboxHeightLayoutCoefficients, topLayoutCoefficients, leftLayoutCoefficients,
+				childSize,
+				measuredWidth, measuredHeight, measuredSandboxHeight, measuredSandboxWidth, measuredLeft, measuredTop,
+				pixelUnits = "px",
+				runningHeight = 0, runningWidth = 0, 
+				rows = [[]], row,
+				rowHeights = [], rowHeight,
+				deferredTopCalculations = [],
+				deferHeight,
+				sizeHeight,
+				verticalAlignmentOffset = 0,
+				len = children.length, rowLen,
+				verifyChild = this.verifyChild,
+				updateBorder = this.updateBorder,
+				measureNode = this._measureNode,
+				nodeStyle;
+
+			// Calculate horizontal size and position for the children
+			for(i = 0; i < len; i++) {
 				
-			// Determine if any children have fill height
-			for (var i = 0; i < children.length; i++) {
-				children[i]._hasFillWidth() && (childrenWithFillWidth = true);
-			}
-			
-			if (childrenWithFillWidth) {
-				for (var i = 0; i < children.length; i++) {
-					var child = children[i];
-					if (this.verifyChild(child,element) && !child._hasFillWidth()) {
-						var childWidth;
-						if (child._markedForLayout) {
-							childWidth = child._doLayout({
-							 	origin: {
-							 		x: 0,
-							 		y: 0
-							 	},
-							 	isParentSize: {
-							 		width: isWidthSize,
-							 		height: isHeightSize
-							 	},
-							 	boundingSize: {
-							 		width: width,
-							 		height: height
-							 	},
-							 	alignment: {
-							 		horizontal: this._defaultHorizontalAlignment,
-							 		vertical: this._defaultVerticalAlignment
-							 	},
-							 	rightIsMargin: true,
-								positionElement: false,
-						 		layoutChildren: true
-							}).effectiveWidth;
+				child = element._children[i];
+				if (!child._alive || !child.domNode) {
+					this.handleInvalidState(child,element);
+				} else {
+					
+					child._measuredRunningWidth = runningWidth;
+					
+					if (child._markedForLayout) {
+						((child._preLayout && child._preLayout(width, height, isWidthSize, isHeightSize)) || child._needsMeasuring) && measureNode(child, child, child._layoutCoefficients, this);
+									
+						layoutCoefficients = child._layoutCoefficients;
+						widthLayoutCoefficients = layoutCoefficients.width;
+						heightLayoutCoefficients = layoutCoefficients.height;
+						sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+						leftLayoutCoefficients = layoutCoefficients.left;
+						
+						measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2 * (width - runningWidth) + widthLayoutCoefficients.x3;
+						measuredHeight = heightLayoutCoefficients.x2 === 0 ? heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x3 : NaN;
+						
+						if (isNaN(measuredWidth) || isNaN(heightLayoutCoefficients.x1)) {
+							if (child._getContentSize) {
+								childSize = child._getContentSize(measuredWidth, measuredHeight);
+							} else {
+								childSize = child._layout._doLayout(
+									child, 
+									isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+									isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+									isNaN(measuredWidth), 
+									isNaN(measuredHeight));
+							}
+							isNaN(measuredWidth) && (measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth);
+							isNaN(heightLayoutCoefficients.x1) && (measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth);
+							
+							child._childrenLaidOut = true;
+							if (heightLayoutCoefficients.x2 !== 0 && !isNaN(heightLayoutCoefficients.x2)) {
+								API.warn("Child of width SIZE and height FILL detected in a horizontal layout. Performance degradation may occur.");
+								child._childrenLaidOut = false;
+							}
 						} else {
-							childWidth = child._measuredEffectiveWidth;
+							child._childrenLaidOut = false;
 						}
-						availableWidth -= childWidth;
+						child._measuredWidth = measuredWidth;
+						child._measuredHeight = measuredHeight;
+						
+						measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + measuredWidth;
+						
+						measuredLeft = leftLayoutCoefficients.x1 * width + leftLayoutCoefficients.x2 + runningWidth;
+						if (!isWidthSize && floor(measuredSandboxWidth + runningWidth) > ceil(width)) {
+							rows.push([]);
+							measuredLeft -= runningWidth;
+							runningWidth = 0;
+						}
+						child._measuredLeft = measuredLeft;
+						rows[rows.length - 1].push(child);
+						runningWidth += measuredSandboxWidth;
+						runningWidth > computedSize.width && (computedSize.width = runningWidth);
 					}
 				}
 			}
 			
-			for(var i = 0; i < children.length; i++) {
-				
-				// Layout the child
-				var child = children[i],
-					isWidthFill = child._hasFillWidth();
-				
-				if (child._markedForLayout) {
-					child._doLayout({
-					 	origin: {
-					 		x: currentLeft,
-					 		y: 0
-					 	},
-					 	isParentSize: {
-					 		width: isWidthSize,
-					 		height: isHeightSize
-					 	},
-					 	boundingSize: {
-					 		width: isWidthFill ? availableWidth : width,
-					 		height: height
-					 	},
-					 	alignment: {
-					 		horizontal: this._defaultHorizontalAlignment,
-					 		vertical: this._defaultVerticalAlignment
-					 	},
-						rightIsMargin: true,
-					 	positionElement: true,
-					 	layoutChildren: !childrenWithFillWidth || isWidthFill
-				 	});
-			 	}
-				
-				// Update the size of the component
-				currentLeft = child._measuredLeft + child._measuredWidth + child._measuredBorderSize.left + child._measuredBorderSize.right + child._measuredRightPadding;
-				var bottomMostEdge = child._measuredTop + child._measuredHeight + child._measuredBorderSize.top + child._measuredBorderSize.bottom + child._measuredBottomPadding;
-				currentLeft > computedSize.width && (computedSize.width = currentLeft);
-				bottomMostEdge > computedSize.height && (computedSize.height = bottomMostEdge);
+			// Calculate vertical size and position for the children
+			len = rows.length
+			for(i = 0; i < len; i++) {
+				row = rows[i];
+				rowHeight = 0;
+				rowLen = row.length
+				for (j = 0; j < rowLen; j++) {
+					child = row[j];
+					
+					if (child._markedForLayout) {
+						layoutCoefficients = child._layoutCoefficients;
+						topLayoutCoefficients = layoutCoefficients.top;
+						heightLayoutCoefficients = layoutCoefficients.height;
+						sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+						measuredHeight = child._measuredHeight;
+						isNaN(measuredHeight) && (child._measuredHeight = measuredHeight = heightLayoutCoefficients.x1 * 
+							height + heightLayoutCoefficients.x2 * (height - runningHeight) + heightLayoutCoefficients.x3);
+						
+						if (!child._childrenLaidOut) {
+							measuredWidth = child._measuredWidth;
+							child._childrenLaidOut = true;
+							child._layout._doLayout(
+								child, 
+								isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+								isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+								isNaN(measuredWidth), 
+								isNaN(measuredHeight));
+						}
+						
+						if (topLayoutCoefficients.x2 !== 0) {
+							deferredTopCalculations.push(child);
+							measuredTop = runningHeight; // Temporary for use in calculating row height
+						} else {
+							child._measuredTop = measuredTop = topLayoutCoefficients.x1 * height + 
+								topLayoutCoefficients.x3 * measuredHeight + topLayoutCoefficients.x4 + runningHeight;
+						}
+						
+						child._measuredSandboxHeight = measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + measuredHeight + measuredTop - runningHeight;
+						rowHeight < measuredSandboxHeight && (rowHeight = measuredSandboxHeight);
+					}
+				}
+				rowHeights.push(rowHeight);
+				runningHeight += rowHeight;
 			}
-			return computedSize;
+			
+			// Second pass, if necessary, to determine the top values
+			runningHeight = 0;
+			len = rows.length;
+			for(i = 0; i < len; i++) {
+				row = rows[i];
+				rowHeight = rowHeights[i];
+				rowLen = row.length;
+				for (j = 0; j < rowLen; j++) {
+					child = row[j];
+					child._measuredRunningHeight = runningHeight;
+					child._measuredRowHeight = rowHeight;
+					if (~deferredTopCalculations.indexOf(child) && child._markedForLayout) {
+						measuredHeight = child._measuredHeight;
+						topLayoutCoefficients = child._layoutCoefficients.top;
+						child._measuredTop = topLayoutCoefficients.x1 * height + topLayoutCoefficients.x2 * rowHeight + topLayoutCoefficients.x3 * measuredHeight + topLayoutCoefficients.x4 + runningHeight;
+					}
+				}
+				runningHeight += rowHeight;
+			}
+			computedSize.height = runningHeight;
+			
+			// Calculate the alignment offset (mobile web specific)
+			if(!isHeightSize) { 
+				switch(this._defaultVerticalAlignment) {
+					case "end": 
+						verticalAlignmentOffset = height - runningHeight;
+					case "center":
+						verticalAlignmentOffset /= 2;
+				}
+			}
+			
+			// Position the children
+			len = children.length
+			for(i = 0; i < len; i++) {
+				child = children[i];
+				if (child._markedForLayout) {
+					UI._elementLayoutCount++;
+					child = children[i];
+					nodeStyle = child.domNode.style;
+					nodeStyle.zIndex = child.zIndex;
+					nodeStyle.left = round(child._measuredLeft) + pixelUnits;
+					nodeStyle.top = round(child._measuredTop) + pixelUnits;
+					nodeStyle.width = round(child._measuredWidth - child._borderLeftWidth - child._borderRightWidth) + pixelUnits;
+					nodeStyle.height = round(child._measuredHeight - child._borderTopWidth - child._borderBottomWidth) + pixelUnits;
+					child._markedForLayout = false;
+					child.fireEvent("postlayout");
+				}
+			}
+			
+			return this._computedSize = computedSize;
 		},
 		
-		_defaultHorizontalAlignment: "left",
+		_getWidth: function(node, width) {
+			
+			// Get the width or default width, depending on which one is needed
+			!isDef(width) && (width = node._defaultWidth);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (width === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getWidth(node._parent, node._parent.width) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return width;
+		},
 		
-		_defaultVerticalAlignment: "top"
+		_getHeight: function(node, height) {
+			
+			// Get the height or default height, depending on which one is needed
+			!isDef(height) && (height = node._defaultHeight);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (height === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getHeight(node._parent, node._height) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return height;
+		},
+		
+		_isDependentOnParent: function(node){
+			var layoutCoefficients = node._layoutCoefficients;
+			return (!isNaN(layoutCoefficients.width.x1) && layoutCoefficients.width.x1 !== 0) ||
+				(!isNaN(layoutCoefficients.width.x2) && layoutCoefficients.width.x2 !== 0) || // width
+				(!isNaN(layoutCoefficients.height.x1) && layoutCoefficients.height.x1 !== 0) || 
+				(!isNaN(layoutCoefficients.height.x2) && layoutCoefficients.height.x2 !== 0) || // height
+				layoutCoefficients.sandboxWidth.x1 !== 0 || // sandbox width
+				layoutCoefficients.sandboxHeight.x1 !== 0 || // sandbox height
+				layoutCoefficients.left.x1 !== 0 || // left
+				layoutCoefficients.top.x1 !== 0; // top
+		},
+		
+		_doAnimationLayout: function(node, animationCoefficients) {
+			
+			var parentWidth = node._parent._measuredWidth,
+				parentHeight = node._parent._measuredHeight,
+				nodeWidth = node._measuredWidth,
+				nodeHeight = node._measuredHeight,
+				runningWidth = node._measuredRunningWidth,
+				runningHeight = node._measuredRunningHeight,
+				rowHeight = node._measuredRowHeight;
+			
+			return {
+				width: animationCoefficients.width.x1 * parentWidth + animationCoefficients.width.x2 * (parentWidth - runningWidth) + animationCoefficients.width.x3,
+				height: animationCoefficients.height.x1 * parentHeight + animationCoefficients.height.x2 * (parentHeight - runningHeight) + animationCoefficients.height.x3,
+				left: animationCoefficients.left.x1 * parentWidth + animationCoefficients.left.x2  + runningWidth,
+				top: animationCoefficients.top.x1 * parentHeight + animationCoefficients.top.x2 * rowHeight + animationCoefficients.top.x3 * nodeHeight + animationCoefficients.top.x4 + runningHeight
+			}
+		},
+		
+		_measureNode: function(node, layoutProperties, layoutCoefficients, self) {
+			
+			node._needsMeasuring = false;
+			
+			// Pre-processing
+			var getValueType = self.getValueType,
+				computeValue = self.computeValue,
+			
+				width = self._getWidth(node, layoutProperties.width),
+				widthType = getValueType(width),
+				widthValue = computeValue(width, widthType),
+				
+				height = self._getHeight(node, layoutProperties.height),
+				heightType = getValueType(height),
+				heightValue = computeValue(height, heightType),
+				
+				left = layoutProperties.left,
+				leftType = getValueType(left),
+				leftValue = computeValue(left, leftType),
+				
+				right = layoutProperties.right,
+				rightType = getValueType(right),
+				rightValue = computeValue(right, rightType),
+				
+				top = layoutProperties.top,
+				topType = getValueType(top),
+				topValue = computeValue(top, topType),
+				
+				bottom = layoutProperties.bottom,
+				bottomType = getValueType(bottom),
+				bottomValue = computeValue(bottom, bottomType),
+				
+				x1, x2, x3, x4,
+				
+				widthLayoutCoefficients = layoutCoefficients.width,
+				heightLayoutCoefficients = layoutCoefficients.height,
+				sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth,
+				sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight,
+				leftLayoutCoefficients = layoutCoefficients.left,
+				topLayoutCoefficients = layoutCoefficients.top;
+				
+			// Width rule calculation
+			x1 = x2 = x3 = 0;
+			if (widthType === UI.SIZE) {
+				x1 = x2 = x3 = NaN;
+			} else if (widthType === UI.FILL) {
+				x2 = 1;
+				leftType === "%" && (x1 = -leftValue);
+				leftType === "#" && (x3 = -leftValue);
+				rightType === "%" && (x1 = -rightValue);
+				rightType === "#" && (x3 = -rightValue);
+			} else if (widthType === "%") {
+				x1 = widthValue;
+			} else if (widthType === "#") {
+				x3 = widthValue;
+			}
+			widthLayoutCoefficients.x1 = x1;
+			widthLayoutCoefficients.x2 = x2;
+			widthLayoutCoefficients.x3 = x3;
+			
+			// Sandbox width rule calculation
+			x1 = x2 = 0;
+			leftType === "%" && (x1 = leftValue);
+			leftType === "#" && (x2 = leftValue);
+			rightType === "%" && (x1 += rightValue);
+			rightType === "#" && (x2 += rightValue);
+			sandboxWidthLayoutCoefficients.x1 = x1;
+			sandboxWidthLayoutCoefficients.x2 = x2;
+			
+			// Height rule calculation
+			x1 = x2 = x3 = 0;
+			if (heightType === UI.SIZE) {
+				x1 = x2 = x3 = NaN;
+			} else if (heightType === UI.FILL) {
+				x2 = 1;
+				topType === "%" && (x1 = -topValue);
+				topType === "#" && (x3 = -topValue);
+			} else if (heightType === "%") {
+				x1 = heightValue;
+			} else if (heightType === "#") {
+				x3 = heightValue;
+			}
+			heightLayoutCoefficients.x1 = x1;
+			heightLayoutCoefficients.x2 = x2;
+			heightLayoutCoefficients.x3 = x3;
+			
+			// Sandbox height rule calculation
+			sandboxHeightLayoutCoefficients.x1 = bottomType === "%" ? bottomValue : 0;
+			sandboxHeightLayoutCoefficients.x2 = bottomType === "#" ? bottomValue : 0;
+			
+			// Left rule calculation
+			leftLayoutCoefficients.x1 = leftType === "%" ? leftValue : 0;
+			leftLayoutCoefficients.x2 = leftType === "#" ? leftValue : 0;
+			
+			// Top rule calculation
+			x1 = x2 = x3 = x4 = 0;
+			if (topType === "%") {
+				x1 = topValue;
+			} else if(topType === "#") {
+				x4 = topValue;
+			} else if(bottomType === "%") {
+				x1 = 1 - bottomValue;
+				x3 = -1;
+			} else if(bottomType === "#") {
+				x1 = 1;
+				x3 = -1;
+				x4 = -bottomValue;
+			} else { 
+				switch(self._defaultRowAlignment) {
+					case "center": 
+						x2 = 0.5;
+						x3 = -0.5;
+						break;
+					case "end":
+						x2 = 1;
+						x3 = -1;
+				}
+			}
+			topLayoutCoefficients.x1 = x1;
+			topLayoutCoefficients.x2 = x2;
+			topLayoutCoefficients.x3 = x3;
+			topLayoutCoefficients.x4 = x4;
+		},
+		
+		_defaultHorizontalAlignment: "start",
+		
+		_defaultVerticalAlignment: "start",
+		
+		_defaultRowAlignment: "center"
 
 	});
 
@@ -2952,44 +3160,30 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 	return declare("Ti.UI.Label", FontWidget, {
 
 		constructor: function() {
-			// Create the aligner div. This sets up a flexbox to float the text to the middle
-			var aligner = this.textAlignerDiv = dom.create("div", {
-				className: css.clean("TiUILabelTextAligner"),
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxOrient: "vertical",
-					boxPack: "center"
-				}
-			}, this.domNode);
-
-			// Create the container div. This gets floated by the flexbox
-			this.textContainerDiv = dom.create("div", {
-				className: css.clean("TiUILabelTextContainer")
-			}, aligner);
-
-			this._addStyleableDomNode(this.textContainerDiv);
+			this._add(this._textContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.SIZE,
+				center: {y: "50%"}
+			}));
 			
+			var self = this,
+				textContainerDomNode = this._textContainerDomNode = this._textContainer.domNode;
+			self._textContainer._getContentSize = function(width, height) {
+				var text = self._textContainerDomNode.innerHTML,
+					measuredSize = self._measureText(text, textContainerDomNode, self._hasSizeWidth() ? void 0 : width);
+				return {
+					width: measuredSize.width,
+					height: measuredSize.height
+				};
+			};
+			
+			this._addStyleableDomNode(textContainerDomNode);
 			this.wordWrap = true;
 		},
 
 		_defaultWidth: UI.SIZE,
 
 		_defaultHeight: UI.SIZE,
-		
-		_getContentSize: function(width, height) {
-			var text = this._getText();
-			return {
-				width: this._measureText(text, this.textContainerDiv, width).width,
-				height: this._measureText(text, this.textContainerDiv, width).height
-			};
-		},
-
-		_setTouchEnabled: function(value) {
-			FontWidget.prototype._setTouchEnabled.apply(this,arguments);
-			var cssVal = value ? "auto" : "none"
-			setStyle(this.textAlignerDiv,"pointerEvents", cssVal);
-			setStyle(this.textContainerDiv,"pointerEvents", cssVal);
-		},
 
 		_getText: function() {
 			var i,
@@ -2997,6 +3191,12 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 				currentIndex = 0,
 				currentTabIndex,
 				text = Locale._getString(this.textid, this.text);
+
+			// Handle null, undefined, etc edge case
+			if (text === void 0) {
+				return "";
+			}
+			text += "";
 
 			// Convert \t and \n to &nbsp;'s and <br/>'s
 			while (currentIndex < text.length) {
@@ -3025,14 +3225,14 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 		},
 
 		_setText: function() {
-			this.textContainerDiv.innerHTML = this._getText();
+			this._textContainerDomNode.innerHTML = this._getText();
 			this._hasSizeDimensions() && this._triggerLayout();
 		},
 
 		_setTextShadow: function() {
 			var shadowColor = this.shadowColor && this.shadowColor !== "" ? this.shadowColor : void 0;
 			setStyle(
-				this.textContainerDiv,
+				this._textContainerDomNode,
 				"textShadow",
 				this.shadowOffset || shadowColor
 					? (this.shadowOffset ? unitize(this.shadowOffset.x) + " " + unitize(this.shadowOffset.y) : "0px 0px") + " 0.1em " + lang.val(shadowColor,"black")
@@ -3043,43 +3243,59 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 		properties: {
 			ellipsize: {
 				set: function(value) {
-					setStyle(this.textContainerDiv,"textOverflow", !!value ? "ellipsis" : "clip");
+					setStyle(this._textContainerDomNode,"textOverflow", !!value ? "ellipsis" : "clip");
 					return value;
 				},
 				value: true
 			},
 			html: {
 				set: function(value) {
-					this.textContainerDiv.innerHTML = value;
+					this._textContainerDomNode.innerHTML = value;
 					this._hasSizeDimensions() && this._triggerLayout();
 					return value;
 				}
 			},
 			shadowColor: {
-				post: function(value) {
+				post: function() {
 					this._setTextShadow();
-					return value;
 				}
 			},
 			shadowOffset: {
-				post: function(value) {
+				post: function() {
 					this._setTextShadow();
-					return value;
 				}
 			},
 			text: textPost,
 			textAlign: {
 				set: function(value) {
-					setStyle(this.textContainerDiv, "textAlign", /(center|right)/.test(value) ? value : "left");
+					setStyle(this._textContainerDomNode, "textAlign", /(center|right)/.test(value) ? value : "left");
 					return value;
 				}
 			},
 			textid: textPost,
 			wordWrap: {
 				set: function(value) {
-					setStyle(this.textContainerDiv, "whiteSpace", !!value ? "normal" : "nowrap");
+					setStyle(this._textContainerDomNode, "whiteSpace", !!value ? "normal" : "nowrap");
 					return value;
 				}
+			},
+			verticalAlign: {
+				set: function(value) {
+					var top,
+						bottom,
+						center = this.center || {},
+						textContainer = this._textContainer;
+					switch(value) {
+						case UI.TEXT_VERTICAL_ALIGNMENT_TOP: top = 0; break;
+						case UI.TEXT_VERTICAL_ALIGNMENT_CENTER: center.y = "50%"; break;
+						case UI.TEXT_VERTICAL_ALIGNMENT_BOTTOM: bottom = 0; break;
+					}
+					textContainer.top = top;
+					textContainer.center = center;
+					textContainer.bottom = bottom;
+					return value;
+				},
+				value: UI.TEXT_VERTICAL_ALIGNMENT_CENTER
 			}
 		}
 
@@ -3091,13 +3307,17 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 /* /titanium/Ti/_/Layouts.js */
 
 define(
-	["Ti/_/Layouts/Composite", "Ti/_/Layouts/Horizontal", "Ti/_/Layouts/Vertical"],
-	function(Composite, Horizontal, Vertical) {
+	["Ti/_/Layouts/Composite", "Ti/_/Layouts/Horizontal", "Ti/_/Layouts/Vertical", "Ti/_/Layouts/ConstrainingHorizontal", "Ti/_/Layouts/ConstrainingVertical"],
+	function(Composite, Horizontal, Vertical, ConstrainingHorizontal, ConstrainingVertical) {
 
 	return {
 		Composite: Composite,
 		Horizontal: Horizontal,
-		Vertical: Vertical
+		Vertical: Vertical,
+		
+		// Mobile web specific layouts, used for internal controls
+		ConstrainingHorizontal: ConstrainingHorizontal,
+		ConstrainingVertical: ConstrainingVertical
 	};
 
 });
@@ -3120,6 +3340,7 @@ define(["Ti/_/declare", "Ti/_/lang"], function(declare,lang) {
 				sourceWidgetId = currentNode.getAttribute("data-widget-id"),
 				nodeStack = [node],
 				i,
+				len,
 				children;
 				
 			// Find the first fully fledged Ti component
@@ -3136,10 +3357,15 @@ define(["Ti/_/declare", "Ti/_/lang"], function(declare,lang) {
 				currentNode = nodeStack.pop();
 				if (currentNode._alive) {
 					if (currentNode.widgetId === sourceWidgetId) {
+						
+						// Find the top most published node
+						while(currentNode && !currentNode._isPublished) {
+							currentNode = currentNode._parent;
+						}
 						return currentNode;
 					}
-					children = currentNode.children;
-					for (i in children) {
+					children = currentNode._children;
+					for (i = 0, len = children.length; i < len; i++) {
 						nodeStack.push(children[i]);
 					}
 				}
@@ -3170,41 +3396,487 @@ define(["Ti/_/declare", "Ti/_/lang"], function(declare,lang) {
 
 });
 },
+"Ti/_/Layouts/ConstrainingVertical":function(){
+/* /titanium/Ti/_/Layouts/ConstrainingVertical.js */
+
+define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/UI", "Ti/_/lang", "Ti/_/style"], function(Base, declare, UI, lang, style) {
+	
+	var isDef = lang.isDef,
+		setStyle = style.set,
+		round = Math.round;
+
+	return declare("Ti._.Layouts.ConstrainingVertical", Base, {
+
+		_doLayout: function(element, width, height, isWidthSize, isHeightSize) {
+			var computedSize = {width: 0, height: 0},
+				children = element._children,
+				child,
+				i = 0,
+				layoutCoefficients, 
+				widthLayoutCoefficients, heightLayoutCoefficients, sandboxWidthLayoutCoefficients, sandboxHeightLayoutCoefficients, topLayoutCoefficients, leftLayoutCoefficients, 
+				childSize,
+				measuredWidth, measuredHeight, measuredSandboxHeight, measuredSandboxWidth, measuredLeft, measuredTop,
+				pixelUnits = "px",
+				deferredPositionCalculations = [],
+				deferredLeftCalculations = [],
+				runningHeight = 0,
+				remainingSpace,
+				fillCount = 0,
+				len = children.length,
+				verifyChild = this.verifyChild,
+				updateBorder = this.updateBorder,
+				measureNode = this._measureNode,
+				style;
+				
+			// Calculate size for the non-FILL children
+			for(i = 0; i < len; i++) {
+				
+				child = element._children[i];
+				if (!child._alive || !child.domNode) {
+					this.handleInvalidState(child,element);
+				} else {
+					
+					if (child._markedForLayout) {
+						((child._preLayout && child._preLayout(width, height, isWidthSize, isHeightSize)) || child._needsMeasuring) && measureNode(child, child, child._layoutCoefficients, this);
+									
+						layoutCoefficients = child._layoutCoefficients;
+						heightLayoutCoefficients = layoutCoefficients.height;
+						
+						if (heightLayoutCoefficients.x2 === 0 || isNaN(heightLayoutCoefficients.x2)) {
+							widthLayoutCoefficients = layoutCoefficients.width;
+							sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+							sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+							
+							measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2;
+							measuredHeight = heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x2 * (height - runningHeight) + heightLayoutCoefficients.x3;
+							
+							if (child._getContentSize) {
+								childSize = child._getContentSize(measuredWidth, measuredHeight);
+							} else {
+								childSize = child._layout._doLayout(
+									child, 
+									isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+									isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+									isNaN(measuredWidth), 
+									isNaN(measuredHeight));
+							}
+							isNaN(measuredWidth) && (measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth);
+							isNaN(measuredHeight) && (measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth);
+							
+							measuredSandboxHeight = child._measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + measuredHeight;
+							
+							runningHeight += measuredSandboxHeight;
+							
+							child._measuredWidth = measuredWidth;
+							child._measuredHeight = measuredHeight;
+						} else {
+							fillCount++;
+						}
+					}
+				}
+			}
+			
+			// Calculate size for the FILL children
+			remainingSpace = height - runningHeight;
+			runningHeight = Math.floor(remainingSpace / fillCount); // Temporary repurposing of runningHeight
+			for(i = 0; i < len; i++) {
+				
+				child = element._children[i];
+				
+				if (child._markedForLayout) {
+								
+					layoutCoefficients = child._layoutCoefficients;
+					heightLayoutCoefficients = layoutCoefficients.height;
+					
+					if (heightLayoutCoefficients.x2 !== 0 && !isNaN(heightLayoutCoefficients.x2)) {
+						widthLayoutCoefficients = layoutCoefficients.width;
+						sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+						sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+						
+						measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2;
+						measuredHeight = heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x2 * (i < len - 1 ? runningHeight : remainingSpace - runningHeight * (fillCount - 1)) + heightLayoutCoefficients.x3;
+						
+						if (child._getContentSize) {
+							childSize = child._getContentSize(measuredWidth, measuredHeight);
+						} else {
+							childSize = child._layout._doLayout(
+								child, 
+								isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+								isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+								isNaN(measuredWidth), 
+								isNaN(measuredHeight));
+						}
+						isNaN(measuredWidth) && (measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth);
+						isNaN(measuredHeight) && (measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth);
+						child._measuredWidth = measuredWidth;
+						child._measuredHeight = measuredHeight;
+						
+						measuredSandboxHeight = child._measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + measuredHeight;
+					}
+				}
+			}
+			
+			// Calculate position for the children
+			runningHeight = 0
+			for(i = 0; i < len; i++) {
+				
+				child = element._children[i];
+				child._measuredRunningHeight = runningHeight;
+				if (child._markedForLayout) {
+					layoutCoefficients = child._layoutCoefficients;
+					sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+					topLayoutCoefficients = layoutCoefficients.top;
+					leftLayoutCoefficients = layoutCoefficients.left;
+					
+					if (isWidthSize && leftLayoutCoefficients.x1 !== 0) {
+						deferredLeftCalculations.push(child);
+					} else {
+						measuredWidth = child._measuredWidth;
+						
+						measuredLeft = child._measuredLeft = leftLayoutCoefficients.x1 * width + leftLayoutCoefficients.x2 * measuredWidth + leftLayoutCoefficients.x3;
+						measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + measuredWidth + (isNaN(measuredLeft) ? 0 : measuredLeft);
+						measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+					}
+					measuredTop = child._measuredTop = topLayoutCoefficients.x1 * height + topLayoutCoefficients.x2 + runningHeight;
+				}
+				runningHeight += child._measuredSandboxHeight;
+			}
+			computedSize.height = runningHeight;
+			
+			// Calculate the preliminary sandbox widths (missing left, since one of these widths may end up impacting all the lefts)
+			len = deferredLeftCalculations.length;
+			for(i = 0; i < len; i++) {
+				child = deferredLeftCalculations[i];
+				sandboxWidthLayoutCoefficients = child._layoutCoefficients.sandboxWidth;
+				measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + child._measuredWidth;
+				measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+			}
+			
+			// Second pass, if necessary, to determine the left values
+			for(i = 0; i < len; i++) {
+				child = deferredLeftCalculations[i];
+				
+				leftLayoutCoefficients = child._layoutCoefficients.left;
+				sandboxWidthLayoutCoefficients = child._layoutCoefficients.sandboxWidth;
+				measuredWidth = child._measuredWidth;
+				measuredSandboxWidth = child._measuredSandboxWidth;
+				
+				measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+				measuredLeft = child._measuredLeft = leftLayoutCoefficients.x1 * computedSize.width + leftLayoutCoefficients.x2 * measuredWidth + leftLayoutCoefficients.x3;
+				child._measuredSandboxWidth += (isNaN(measuredLeft) ? 0 : measuredLeft);
+			}
+			
+			// Position the children
+			len = children.length;
+			for(i = 0; i < len; i++) {
+				child = children[i];
+				if (child._markedForLayout) {
+					UI._elementLayoutCount++;
+					child = children[i];
+					style = child.domNode.style;
+					style.zIndex = child.zIndex;
+					style.left = round(child._measuredLeft) + pixelUnits;
+					style.top = round(child._measuredTop) + pixelUnits;
+					style.width = round(child._measuredWidth - child._borderLeftWidth - child._borderRightWidth) + pixelUnits;
+					style.height = round(child._measuredHeight - child._borderTopWidth - child._borderBottomWidth) + pixelUnits;
+					child._markedForLayout = false;
+					child.fireEvent("postlayout");
+				}
+			}
+			
+			return this._computedSize = computedSize;
+		},
+		
+		_getWidth: function(node, width) {
+			
+			// Get the width or default width, depending on which one is needed
+			!isDef(width) && (isDef(node.left) + isDef(node.center && node.center.x) + isDef(node.right) < 2) && (width = node._defaultWidth);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (width === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getWidth(node._parent, node._parent.width) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return width;
+		},
+		
+		_getHeight: function(node, height) {
+			
+			// Get the height or default height, depending on which one is needed
+			!isDef(height) && (height = node._defaultHeight);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (height === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getHeight(node._parent, node._parent.height) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return height;
+		},
+		
+		_isDependentOnParent: function(node){
+			var layoutCoefficients = node._layoutCoefficients;
+			return (!isNaN(layoutCoefficients.width.x1) && layoutCoefficients.width.x1 !== 0) || // width
+				(!isNaN(layoutCoefficients.height.x1) && layoutCoefficients.height.x1 !== 0) ||
+				(!isNaN(layoutCoefficients.height.x2) && layoutCoefficients.height.x2 !== 0) || // height
+				layoutCoefficients.sandboxWidth.x1 !== 0 || // sandbox width
+				layoutCoefficients.sandboxHeight.x1 !== 0 || // sandbox height
+				layoutCoefficients.left.x1 !== 0 || // left
+				layoutCoefficients.top.x1 !== 0; // top
+		},
+		
+		_doAnimationLayout: function(node, animationCoefficients) {
+			
+			var parentWidth = node._parent._measuredWidth,
+				parentHeight = node._parent._measuredHeight,
+				nodeWidth = node._measuredWidth,
+				nodeHeight = node._measuredHeight,
+				runningHeight = node._measuredRunningHeight,
+				width = animationCoefficients.width.x1 * parentWidth + animationCoefficients.width.x2;
+			
+			return {
+				width: width,
+				height: animationCoefficients.height.x1 * parentHeight + animationCoefficients.height.x2 * (parentHeight - runningHeight) + animationCoefficients.height.x3,
+				left: animationCoefficients.left.x1 * parentWidth + animationCoefficients.left.x2 * width + animationCoefficients.left.x3,
+				top: animationCoefficients.top.x1 * parentHeight + animationCoefficients.top.x2 + runningHeight
+			}
+		},
+		
+		_measureNode: function(node, layoutProperties, layoutCoefficients, self) {
+			
+			node._needsMeasuring = false;
+			
+			// Pre-processing
+			var getValueType = self.getValueType,
+				computeValue = self.computeValue,
+			
+				width = self._getWidth(node, layoutProperties.width),
+				widthType = getValueType(width),
+				widthValue = computeValue(width, widthType),
+				
+				height = self._getHeight(node, layoutProperties.height),
+				heightType = getValueType(height),
+				heightValue = computeValue(height, heightType),
+				
+				left = layoutProperties.left,
+				leftType = getValueType(left),
+				leftValue = computeValue(left, leftType),
+				
+				centerX = layoutProperties.center && layoutProperties.center.x,
+				centerXType = getValueType(centerX),
+				centerXValue = computeValue(centerX, centerXType),
+				
+				right = layoutProperties.right,
+				rightType = getValueType(right),
+				rightValue = computeValue(right, rightType),
+				
+				top = layoutProperties.top,
+				topType = getValueType(top),
+				topValue = computeValue(top, topType),
+				
+				bottom = layoutProperties.bottom,
+				bottomType = getValueType(bottom),
+				bottomValue = computeValue(bottom, bottomType),
+				
+				x1, x2, x3,
+				
+				widthLayoutCoefficients = layoutCoefficients.width,
+				heightLayoutCoefficients = layoutCoefficients.height,
+				sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth,
+				sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight,
+				leftLayoutCoefficients = layoutCoefficients.left,
+				topLayoutCoefficients = layoutCoefficients.top;
+			
+			// Width rule evaluation
+			x1 = x2 = 0;
+			if (widthType === UI.SIZE) {
+				x1 = x2 = NaN;
+			} else if (widthType === UI.FILL) {
+				x1 = 1;
+				if (leftType === "%") {
+					x1 -= leftValue;
+				} else if (leftType === "#") {
+					x2 = -leftValue;
+				} else if (rightType === "%") {
+					x1 -= rightValue;
+				} else if (rightType === "#") {
+					x2 = -rightValue;
+				}
+			} else if (widthType === "%") {
+				x1 = widthValue;
+			} else if (widthType === "#") {
+				x2 = widthValue;
+			} else if (leftType === "%") {
+				if (centerXType === "%") {
+					x1 = 2 * (centerXValue - leftValue);
+				} else if (centerXType === "#") {
+					x1 = -2 * leftValue;
+					x2 = 2 * centerXValue;
+				} else if (rightType === "%") {
+					x1 = 1 - leftValue - rightValue;
+				} else if (rightType === "#") {
+					x1 = 1 - leftValue;
+					x2 = -rightValue;
+				}
+			} else if (leftType === "#") {
+				if (centerXType === "%") {
+					x1 = 2 * centerXValue;
+					x2 = -2 * leftValue;
+				} else if (centerXType === "#") {
+					x2 = 2 * (centerXValue - leftValue);
+				} else if (rightType === "%") {
+					x1 = 1 - rightValue;
+					x2 = -leftValue;
+				} else if (rightType === "#") {
+					x1 = 1;
+					x2 = -rightValue - leftValue;
+				}
+			} else if (centerXType === "%") {
+				if (rightType === "%") {
+					x1 = 2 * (rightValue - centerXValue);
+				} else if (rightType === "#") {
+					x1 = -2 * centerXValue;
+					x2 = 2 * rightValue;
+				}
+			} else if (centerXType === "#") {
+				if (rightType === "%") {
+					x1 = 2 * rightValue;
+					x2 = -2 * centerXValue;
+				} else if (rightType === "#") {
+					x2 = 2 * (rightValue - centerXValue);
+				}
+			}
+			widthLayoutCoefficients.x1 = x1;
+			widthLayoutCoefficients.x2 = x2;
+			
+			// Sandbox width rule evaluation
+			sandboxWidthLayoutCoefficients.x1 = rightType === "%" ? rightValue : 0;
+			sandboxWidthLayoutCoefficients.x2 = rightType === "#" ? rightValue : 0;
+			
+			// Height rule calculation
+			x1 = x2 = x3 = 0;
+			if (heightType === UI.SIZE) {
+				x1 = x2 = x3 = NaN;
+			} else if (heightType === UI.FILL) {
+				x2 = 1;
+				topType === "%" && (x1 = -topValue);
+				topType === "#" && (x3 = -topValue);
+				bottomType === "%" && (x1 = -bottomValue);
+				bottomType === "#" && (x3 = -bottomValue);
+			} else if (heightType === "%") {
+				x1 = heightValue;
+			} else if (heightType === "#") {
+				x3 = heightValue;
+			}
+			heightLayoutCoefficients.x1 = x1;
+			heightLayoutCoefficients.x2 = x2;
+			heightLayoutCoefficients.x3 = x3;
+			
+			// Sandbox height rule calculation
+			x1 = x2 = 0;
+			topType === "%" && (x1 = topValue);
+			topType === "#" && (x2 = topValue);
+			bottomType === "%" && (x1 += bottomValue);
+			bottomType === "#" && (x2 += bottomValue);
+			sandboxHeightLayoutCoefficients.x1 = x1;
+			sandboxHeightLayoutCoefficients.x2 = x2;
+			
+			// Left rule calculation
+			x1 = x2 = x3 = 0;
+			if (leftType === "%") {
+				x1 = leftValue;
+			} else if(leftType === "#") {
+				x3 = leftValue;
+			} else if (centerXType === "%") {
+				x1 = centerXValue;
+				x2 = -0.5;
+			} else if (centerXType === "#") {
+				x2 = -0.5;
+				x3 = centerXValue;
+			} else if (rightType === "%") {
+				x1 = 1 - rightValue;
+				x2 = -1;
+			} else if (rightType === "#") {
+				x1 = 1;
+				x2 = -1;
+				x3 = -rightValue;
+			} else { 
+				switch(self._defaultHorizontalAlignment) {
+					case "center": 
+						x1 = 0.5;
+						x2 = -0.5;
+						break;
+					case "end":
+						x1 = 1;
+						x2 = -1;
+				}
+			}
+			leftLayoutCoefficients.x1 = x1;
+			leftLayoutCoefficients.x2 = x2;
+			leftLayoutCoefficients.x3 = x3;
+			
+			// Top rule calculation
+			topLayoutCoefficients.x1 = topType === "%" ? topValue : 0;
+			topLayoutCoefficients.x2 = topType === "#" ? topValue : 0;
+		},
+		
+		_defaultHorizontalAlignment: "center",
+		
+		_defaultVerticalAlignment: "start"
+
+	});
+
+});
+
+},
 "Ti/UI/ScrollableView":function(){
 /* /titanium/Ti/UI/ScrollableView.js */
 
-define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style", "Ti/UI"],
-	function(declare, Widget, lang, dom, style, UI) {
+define(["Ti/_/browser", "Ti/_/declare", "Ti/_/UI/KineticScrollView", "Ti/_/lang", "Ti/_/dom", "Ti/_/style", "Ti/UI", "Ti/_/event"],
+	function(browser, declare, KineticScrollView, lang, dom, style, UI, event) {
 
 	var setStyle = style.set,
 		is = require.is,
-		unitize = dom.unitize;
+		isDef = lang.isDef,
+		unitize = dom.unitize,
+		once = require.on.once,
 
-	return declare("Ti.UI.ScrollableView", Widget, {
+		// The maximum angle, in radians, from the axis a swipe is allowed to travel before it is no longer considered a swipe
+		angleThreshold = Math.PI/6, // 30 degrees
+
+		// Velocity bounds, used to make sure that animations don't become super long or super short
+		minVelocity = 0.4,
+		maxVelocity = 3,
 
 		// This sets the minimum velocity that determines whether a swipe was a flick or a drag
-		_velocityThreshold: 0.4,
+		velocityThreshold = 0.4,
 
 		// This determines the minimum distance scale (i.e. width divided by this value) before a flick requests a page turn
-		_minimumFlickDistanceScaleFactor: 15,
+		minimumFlickDistanceScaleFactor = 200,
 
 		// This determines the minimum distance scale (i.e. width divided by this value) before a drag requests a page turn
-		_minimumDragDistanceScaleFactor: 2,
+		minimumDragDistanceScaleFactor = 2;
+
+	return declare("Ti.UI.ScrollableView", KineticScrollView, {
 
 		constructor: function(args){
 
 			// Create the content container
-			this._contentContainer = UI.createView({
+			this._initKineticScrollView(UI.createView({
 				left: 0,
 				top: 0,
-				width: "100%",
-				height: "100%"
-			});
-			setStyle(this._contentContainer.domNode, "overflow", "hidden");
-			this.add(this._contentContainer);
+				width: UI.SIZE,
+				height: "100%",
+				layout: "constrainingHorizontal"
+			}), "horizontal");
 
 			// Create the paging control container
-			this.add(this._pagingControlContainer = UI.createView({
+			this._add(this._pagingControlContainer = UI.createView({
 				width: "100%",
 				height: 20,
 				bottom: 0,
@@ -3213,284 +3885,229 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 				touchEnabled: false
 			}));
 
-			this._pagingControlContainer.add(this._pagingControlContentContainer = UI.createView({
+			this._pagingControlContainer._add(this._pagingControlContentContainer = UI.createView({
 				width: UI.SIZE,
 				height: "100%",
 				top: 0,
-				touchEnabled: false
+				touchEnabled: false,
+				layout: "constrainingHorizontal"
 			}));
 
 			// State variables
+			this.properties.__values__.views = [];
 			this._viewToRemoveAfterScroll = -1;
 
-			var initialPosition,
-				animationView,
-				swipeInitialized = false,
-				viewsToScroll,
-				touchEndHandled,
-				startTime;
+			require.on(this, "postlayout", this._updateTranslation);
+		},
 
-			// This touch end handles the case where a swipe was started, but turned out not to be a swipe
-			this.addEventListener("touchend", function(e) {
-				if (!touchEndHandled && swipeInitialized) {
-					var width = this._measuredWidth,
-						destinationLeft = viewsToScroll.indexOf(this.views[this.currentPage]) * -width;
-					animationView.animate({
-						duration: (300 + 0.2 * width) / (width - Math.abs(e._distance)) * 10,
-						left: destinationLeft,
-						curve: UI.ANIMATION_CURVE_EASE_OUT
-					},lang.hitch(this,function(){
-						this._contentContainer._removeAllChildren();
-						this._contentContainer.add(this.views[this.currentPage]);
-					}));
-				}
-			})
+		_handleDragStart: function() {
+			var currentPage = this.currentPage;
+			if (~currentPage) {
+				this._showView(currentPage - 1);
+				this._showView(currentPage);
+				this._showView(currentPage + 1);
+				this.fireEvent("dragStart");
+			}
+		},
 
-			this.addEventListener("swipe", function(e){
-				// If we haven't started swiping yet, start swiping,
-				var width = this._measuredWidth;
-				if (!swipeInitialized) {
-					swipeInitialized = true;
-					touchEndHandled = false;
-					startTime = (new Date()).getTime();
-					
-					// Create the list of views that can be scrolled, the ones immediately to the left and right of the current view
-					initialPosition = 0;
-					viewsToScroll = [];
-					if (this.currentPage > 0) {
-						viewsToScroll.push(this.views[this.currentPage - 1]);
-						initialPosition = -width;
-					}
-					viewsToScroll.push(this.views[this.currentPage]);
-					if (this.currentPage < this.views.length - 1) {
-						viewsToScroll.push(this.views[this.currentPage + 1]);
-					}
-					
-					// Create the animation div
-					animationView = UI.createView({
-						width: unitize(viewsToScroll.length * width),
-						height: "100%",
-						left: initialPosition,
-						top: 0
-					});
-		
-					// Attach the child views, each contained in their own div so we can mess with positioning w/o touching the views
-					this._contentContainer._removeAllChildren();
-					for (var i = 0; i < viewsToScroll.length; i++) {
-						var viewContainer = UI.createView({
-							left: unitize(i * width),
-							top: 0,
-							width: unitize(width),
-							height: "100%",
-							layout: "horizontal" // Do a horizontal to force the child to (0,0) without overwriting the original position values
-						});
-						setStyle(viewContainer.domNode,"overflow","hidden");
-						viewContainer.add(viewsToScroll[i]);
-						animationView.add(viewContainer);
-					}
-					
-					// Set the initial position
-					animationView.left = unitize(initialPosition);
-					this._contentContainer.add(animationView);
-					this._triggerLayout(true);
+		_handleDrag: function(e) {
+			var currentPage = this.currentPage,
+				currentView = this.views[currentPage];
+			if (currentView) {
+				this.fireEvent("scroll", {
+					currentPage: currentPage,
+					currentPageAsFloat: currentPage - e.distanceX / currentView._measuredWidth,
+					view: currentView
+				});
+			}
+		},
+
+		_handleDragCancel: function() {
+			var currentPage = this.currentPage;
+			if (~currentPage) {
+				this._hideView(currentPage - 1);
+				this._showView(currentPage);
+				this._hideView(currentPage + 1);
+			}
+		},
+
+		_handleDragEnd: function(e, velocityX) {
+			if (~this.currentPage && isDef(velocityX)) {
+				velocityX = Math.max(minVelocity, Math.min(maxVelocity, velocityX));
+				var self = this,
+					views = self.views,
+					contentContainer = self._contentContainer,
+					currentPage = self.currentPage,
+					distance = e.distanceX,
+					normalizedWidth = views[currentPage]._measuredWidth / (Math.abs(velocityX) > velocityThreshold ? 
+						minimumFlickDistanceScaleFactor :
+						minimumDragDistanceScaleFactor),
+					destinationPosition,
+					destination = views[currentPage],
+					destinationIndex = currentPage;
+
+				// Determine the animation characteristics
+				if (distance > normalizedWidth && currentPage > 0) {
+					// Previous page
+					destinationIndex = currentPage - 1;
+					distance = (destination = views[destinationIndex])._measuredLeft - self._currentTranslationX;
+				} else if (distance < -normalizedWidth && currentPage < views.length - 1) {
+					// Next page
+					destinationIndex = currentPage + 1;
+					distance = self._currentTranslationX - (destination = views[destinationIndex])._measuredLeft;
 				}
-				
-				// Update the position of the animation div
-				var newPosition = initialPosition + e._distance;
-				newPosition = newPosition < 0 ? newPosition > -animationView._measuredWidth + width ? newPosition :-animationView._measuredWidth + width : 0;
-				animationView.domNode.style.left = unitize(newPosition);
-				
-				// If the swipe is finished, we animate to the final position
-				if (e._finishedSwiping) {
-					swipeInitialized = false;
-					touchEndHandled = true;
-					
-					// Determine whether this was a flick or a drag
-					var velocity = Math.abs((e._distance) / ((new Date()).getTime() - startTime));
-					var scaleFactor = velocity > this._velocityThreshold ? 
-						this._minimumFlickDistanceScaleFactor : this._minimumDragDistanceScaleFactor
-					
-					// Find out which view we are animating to
-					var destinationIndex = this.currentPage,
-						animationLeft = initialPosition;
-					if (e._distance > width / scaleFactor && this.currentPage > 0) {
-						destinationIndex = this.currentPage - 1;
-						animationLeft = 0;
-					} else if (e._distance < -width / scaleFactor && this.currentPage < this.views.length - 1) {
-						destinationIndex = this.currentPage + 1;
-						if (viewsToScroll.length === 3) {
-							animationLeft = -2 * width;
-						} else {
-							animationLeft = -width;
-						}
-					}
-					
-					var self = this;
-					function finalizeSwipe() {
-						self._contentContainer._removeAllChildren();
-						self._contentContainer.add(self.views[destinationIndex]);
-						self._triggerLayout(true);
-						
-						self.currentPage !== destinationIndex && self.fireEvent("scroll",{
+				destinationPosition = -destination._measuredLeft;
+
+				// Fire the drag end event
+				self.fireEvent("dragEnd", {
+					currentPage: destinationIndex,
+					view: destination
+				});
+
+				// Animate the view. Note: the 1.724 constance was calculated, not estimated. It is NOT for tweaking.
+				// If tweaking is needed, tweak the velocity algorithm in KineticScrollView.
+				self._animateToPosition(destinationPosition, 0, Math.abs(1.724 * 
+						(destinationPosition - self._currentTranslationX) / velocityX), "ease-out", function(){
+					destinationIndex !== currentPage - 1 && self._hideView(currentPage - 1);
+					destinationIndex !== currentPage && self._hideView(currentPage);
+					destinationIndex !== currentPage + 1 && self._hideView(currentPage + 1);
+					self.properties.__values__.currentPage = destinationIndex;
+					self._showView(destinationIndex);
+					setTimeout(function(){
+						self.fireEvent("scrollEnd",{
 							currentPage: destinationIndex,
-							view: self.views[destinationIndex],
-							x: e.x,
-							y: e.y
+							view: destination
 						});
-						
-						self.properties.__values__.currentPage = destinationIndex;
-					}
-					
-					// Check if the user attempted to scroll past the edge, in which case we directly reset the view instead of animation
-					this._updatePagingControl(destinationIndex);
-					if (newPosition == 0 || newPosition == -animationView._measuredWidth + width) {
-						finalizeSwipe();
-					} else {
-						// Animate the view and set the final view
-						animationView.animate({
-							duration: 200 + (0.2 * width) / (width - Math.abs(e._distance)) * 10,
-							left: animationLeft,
-							curve: UI.ANIMATION_CURVE_EASE_OUT
-						},lang.hitch(this,function(){
-							finalizeSwipe();
-						}));
-					}
-				}
-			});
+					}, 1);
+				});
+			}
+		},
+
+		_hideView: function(index) {
+			var views = this.views;
+			index >= 0 && index < views.length && setStyle(views[index].domNode, "display", "none");
+		},
+
+		_showView: function(index) {
+			var views = this.views;
+			index >= 0 && index < views.length && setStyle(views[index].domNode, "display", "inherit");
 		},
 
 		addView: function(view){
 			if (view) {
 				this.views.push(view);
-	
-				// Check if any children have been added yet, and if not load this view
+				this._contentContainer._add(view);
 				if (this.views.length == 1) {
 					this.properties.__values__.currentPage = 0;
-					this._contentContainer._removeAllChildren();
-					this._contentContainer.add(view);
+				} else {
+					setStyle(view.domNode, "display", "none");
 				}
-				this._updatePagingControl(this.currentPage);
 			}
 		},
 
 		removeView: function(view) {
-			
+
 			// Get and validate the location of the view
 			var viewIndex = is(view,"Number") ? view : this.views.indexOf(view);
 			if (viewIndex < 0 || viewIndex >= this.views.length) {
 				return;
 			}
-	
+
 			// Update the view if this view was currently visible
-			if (viewIndex == this.currentPage) {
-				if (this.views.length == 1) {
-					this._contentContainer._removeAllChildren();
-					this._removeViewFromList(viewIndex);
-				} else {
-					this._viewToRemoveAfterScroll = viewIndex;
-				    this.scrollToView(viewIndex == this.views.length - 1 ? --viewIndex : ++viewIndex);
-				}
+			if (viewIndex == this.currentPage && this.views.length !== 1) {
+				this._viewToRemoveAfterScroll = viewIndex;
+				this.scrollToView(viewIndex == this.views.length - 1 ? --viewIndex : ++viewIndex);
 			} else {
 				this._removeViewFromList(viewIndex);
 			}
 		},
 
 		_removeViewFromList: function(viewIndex) {
-			// Remove the view
-			this.views.splice(viewIndex,1);
-	
-			// Update the current view if necessary
-			if (viewIndex < this.currentPage){
-				this.properties.__values__.currentPage--;
+
+			var contentContainer = this._contentContainer,
+				self = this;
+
+			// Update the current view if necessary once everything has been re-laid out.
+			if (viewIndex < this.currentPage) {
+				self.properties.__values__.currentPage--;
 			}
-			
-			this._updatePagingControl(this.currentPage);
+
+			// Remove the view and update the paging control
+			contentContainer._remove(self.views.splice(viewIndex,1)[0]);
+			!self.views.length && (self.properties.__values__.currentPage = -1);
+			once(UI, "postlayout", function() {
+				setTimeout(function(){
+					self._updateTranslation();
+				}, 1);
+			});
+			self._updatePagingControl(self.currentPage);
+		},
+
+		_updateTranslation: function() {
+			~this.currentPage && this._setTranslation(-this.views[this.currentPage]._measuredLeft, 0);
 		},
 
 		scrollToView: function(view) {
-			var viewIndex = is(view,"Number") ? view : this.views.indexOf(view)
+			var viewIndex = is(view,"Number") ? view : this.views.indexOf(view),
+				self = this;
 			
 			// Sanity check
 			if (viewIndex < 0 || viewIndex >= this.views.length || viewIndex == this.currentPage) {
 				return;
 			}
-	
-			// If the scrollableView hasn't been laid out yet, we can't do much since the scroll distance is unknown.
-			// At the same time, it doesn't matter since the user won't see it anyways. So we just append the new
-			// element and don't show the transition animation.
-			if (!this._contentContainer.domNode.offsetWidth) {
-				this._contentContainer._removeAllChildren();
-				this._contentContainer.add(this.views[viewIndex]);
-			} else {
-				
+
+			function scroll(){
+
 				// Calculate the views to be scrolled
-				var width = this._measuredWidth,
-					viewsToScroll = [],
-					scrollingDirection = -1,
-					initialPosition = 0;
-				if (viewIndex > this.currentPage) {
-					for (var i = this.currentPage; i <= viewIndex; i++) {
-						viewsToScroll.push(this.views[i]);
+				var contentContainer = self._contentContainer,
+					currentPage = self.currentPage,
+					destination = -self.views[viewIndex]._measuredLeft,
+					i;
+
+					// Calculate a weighted duration so that larger views take longer to scroll.
+					duration = 400 + 0.3 * (Math.abs(viewIndex - self.currentPage) * contentContainer._measuredWidth);
+
+				// Make the views that will be seen visible
+				if (currentPage < viewIndex) {
+					for(i = currentPage + 1; i <= viewIndex; i++) {
+						self._showView(i);
 					}
 				} else {
-					for (var i = viewIndex; i <= this.currentPage; i++) {
-						viewsToScroll.push(this.views[i]);
+					for(i = viewIndex; i < currentPage; i++) {
+						self._showView(i);
 					}
-					initialPosition = -(viewsToScroll.length - 1) * width;
-					scrollingDirection = 1;
 				}
-	
-				// Create the animation div
-				var animationView = UI.createView({
-					width: unitize(viewsToScroll.length * width),
-					height: "100%",
-					left: initialPosition,
-					top: 0
-				});
-	
-				// Attach the child views, each contained in their own div so we can mess with positioning w/o touching the views
-				this._contentContainer._removeAllChildren();
-				for (var i = 0; i < viewsToScroll.length; i++) {
-					var viewContainer = UI.createView({
-						left: unitize(i * width),
-						top: 0,
-						width: unitize(width),
-						height: "100%",
-						layout: "horizontal" // Do a horizontal to force the child to (0,0) without overwriting the original position values
-					});
-					setStyle(viewContainer.domNode,"overflow","hidden");
-					viewContainer.add(viewsToScroll[i]);
-					animationView.add(viewContainer);
-				}
-				
-				// Set the initial position
-				animationView.left = unitize(initialPosition);
-				this._contentContainer.add(animationView);
-				this._triggerLayout(true);
-	
-				// Set the start time
-				var duration = 300 + 0.2 * (width), // Calculate a weighted duration so that larger views take longer to scroll.
-					distance = (viewsToScroll.length - 1) * width;
-					
-				this._updatePagingControl(viewIndex);
-				animationView.animate({
-					duration: duration,
-					left: initialPosition + scrollingDirection * distance,
-					curve: UI.ANIMATION_CURVE_EASE_IN_OUT
-				},lang.hitch(this,function(){
-					this._contentContainer._removeAllChildren();
-					this._contentContainer.add(this.views[viewIndex]);
-					this._triggerLayout(true);
-					this.properties.__values__.currentPage = viewIndex;
-					if (this._viewToRemoveAfterScroll != -1) {
-						this._removeViewFromList(this._viewToRemoveAfterScroll);
-						this._viewToRemoveAfterScroll = -1;
+
+				// Animate the views
+				self._updatePagingControl(viewIndex);
+				self._animateToPosition(destination, 0, duration, "ease-in-out", function(){
+					self.properties.__values__.currentPage = viewIndex;
+					if (currentPage < viewIndex) {
+						for(i = currentPage; i < viewIndex; i++) {
+							self._hideView(i);
+						}
+					} else {
+						for(i = viewIndex + 1; i <= currentPage; i++) {
+							self._hideView(i);
+						}
 					}
-					this.fireEvent("scroll",{
+					if (self._viewToRemoveAfterScroll !== -1) {
+						destination += self.views[self._viewToRemoveAfterScroll]._measuredWidth;
+						self._removeViewFromList(self._viewToRemoveAfterScroll);
+						self._viewToRemoveAfterScroll = -1;
+					}
+					self.fireEvent("scrollEnd",{
 						currentPage: viewIndex,
-						view: this.views[viewIndex]
+						view: self.views[viewIndex]
 					});
-				}));
+				});
+			}
+
+			// If the scrollableView hasn't been laid out yet, we must wait until it is
+			if (self._contentContainer.domNode.offsetWidth) {
+				scroll();
+			} else {
+				once(self, "postlayout", scroll);
 			}
 		},
 
@@ -3517,20 +4134,22 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 		},
 
 		_updatePagingControl: function(newIndex, hidePagingControl) {
-			this._pagingControlContentContainer._removeAllChildren();
-			var diameter = this.pagingControlHeight / 2;
-			for (var i = 0; i < this.views.length; i++) {
-				var indicator = UI.createView({
-					width: diameter,
-					height: diameter,
-					top: diameter / 2,
-					left: i * 2 * diameter,
-					backgroundColor: i === newIndex ? "white" : "grey"
-				});
-				setStyle(indicator.domNode,"borderRadius",unitize(diameter / 2));
-				this._pagingControlContentContainer.add(indicator);
+			if (this.showPagingControl) {
+				this._pagingControlContentContainer._removeAllChildren();
+				var diameter = this.pagingControlHeight / 2;
+				for (var i = 0; i < this.views.length; i++) {
+					var indicator = UI.createView({
+						width: diameter,
+						height: diameter,
+						left: 5,
+						right: 5,
+						backgroundColor: i === newIndex ? "white" : "grey",
+						borderRadius: unitize(diameter / 2)
+					});
+					this._pagingControlContentContainer._add(indicator);
+				}
+				!hidePagingControl && this._showPagingControl();
 			}
-			!hidePagingControl && this._showPagingControl();
 		},
 
 		_defaultWidth: UI.FILL,
@@ -3545,7 +4164,8 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 						return value;
 					}
 					return oldValue;
-				}
+				},
+				value: -1
 			},
 			pagingControlColor: {
 				set: function(value) {
@@ -3563,35 +4183,44 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 			},
 			pagingControlTimeout: {
 				set: function(value) {
-					this.pagingControlTimeout == 0 && this._hidePagingControl();
+					this.pagingControlTimeout == 0 && this._updatePagingControl();
 					return value;
 				},
 				value: 1250
 			},
 			showPagingControl: {
 				set: function(value) {
-					this.pagingControlTimeout == 0 && this._hidePagingControl();
+					this.pagingControlTimeout == 0 && this._updatePagingControl();
 					return value;
 				},
 				value: false
 			},
 			views: {
-				set: function(value, oldValue) {
+				set: function(value) {
+
 					// Value must be an array
 					if (!is(value,"Array")) {
 						return;
 					}
-					if (oldValue.length == 0 && value.length > 0) {
-						this._contentContainer._removeAllChildren();
-						this._contentContainer.add(value[0]);
+
+					// Add the views to the content container
+					var i = 0,
+						len = value.length,
+						contentContainer = this._contentContainer,
+						view;
+					contentContainer._removeAllChildren();
+					for(; i < len; i++) {
+						(view = value[i]).width = "100%";
+						view.height = "100%";
+						contentContainer._add(view);
 					}
-					this.properties.__values__.currentPage = 0;
+					this.properties.__values__.currentPage = len ? 0 : -1;
+
 					return value;
 				},
 				post: function() {
 					this._updatePagingControl(this.currentPage,true);
-				},
-				value: []
+				}
 			}
 		}
 
@@ -3602,58 +4231,74 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 "Ti/UI/ActivityIndicator":function(){
 /* /titanium/Ti/UI/ActivityIndicator.js */
 
-define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/style", "Ti/Locale", "Ti/UI"],
-	function(declare, lang, FontWidget, dom, style, Locale, UI) {
+define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/style", "Ti/Locale", "Ti/UI", "Ti/UI/ActivityIndicatorStyle"],
+	function(declare, lang, Widget, dom, style, Locale, UI, ActivityIndicatorStyle) {
 
 	var opacity = 0.3,
-		setStyle = style.set,
-		postMessage = {
-			post: "_renderMessage"
-		};
+		setStyle = style.set;
 
-	return declare("Ti.UI.ActivityIndicator", FontWidget, {
+	return declare("Ti.UI.ActivityIndicator", Widget, {
 
 		constructor: function() {
-			var prongs = this._prongs = [],
-				container = this._contentContainer = dom.create("div", {
-					className: "TiUIActivityIndicatorContentContainer",
-					style: {
-						boxOrient: "horizontal",
-						boxPack: "center",
-						boxAlign: "center",
-						pointerEvents: "none"
-					}
-				}, this.domNode),
-				indicator = this._indicatorIndicator = dom.create("div", {
-					className: "TiUIActivityIndicatorIndicator",
-					style: {
-						pointerEvents: "none"
-					}
-				}, container),
-				i = 0;
+			var contentContainer = this._contentContainer = UI.createView({
+					layout: UI._LAYOUT_CONSTRAINING_HORIZONTAL,
+					width: UI.SIZE,
+					height: UI.SIZE
+				});
+			this._add(contentContainer);
+			contentContainer.hide();
 
+			contentContainer._add(this._indicatorIndicator = UI.createView());
+			contentContainer._add(this._indicatorMessage = UI.createLabel());
+
+			this._createProngs();
+		},
+
+		_createProngs: function() {
+
+			var i = 0,
+				prongs = this._prongs = [],
+				indicator = this._indicatorIndicator,
+				indicatorDomNode = indicator.domNode,
+				backgroundColor = this.indicatorColor,
+				diameter = this.indicatorDiameter,
+				scale = diameter / 36,
+				prongContainer;
+
+			// Set the container size
+			indicator.width = indicator.height = diameter;
+			
+			// Remove any old children
+			while (indicatorDomNode.firstChild) {
+				indicatorDomNode.removeChild(indicatorDomNode.firstChild);
+			}
+			
+			// Add the prong container
+			prongContainer = dom.create("div", {
+				className: "TiUIActivityIndicatorProngContainer",
+				style: {
+					transformOrigin: "0px 0px",
+					transform: "scale(" + scale + ")"
+				}
+			}, indicatorDomNode)
+
+			// Add the new prongs
 			for (; i < 12; i++) {
 				prongs.push(dom.create("div", {
 					className: "TiUIActivityIndicatorProng",
 					style: {
 						transform: "translate(16px,0px) rotate(" + i * 30 + "deg)",
 						transformOrigin: "2px 18px",
-						opacity: opacity
+						opacity: opacity,
+						backgroundColor: backgroundColor
 					}
-				}, this._indicatorIndicator));
+				}, prongContainer));
 			}
-
-			this._addStyleableDomNode(this._indicatorMessage = dom.create("div", {
-				className: "TiUIActivityIndicatorMessage",
-				style: {
-					pointerEvents: "none"
-				}
-			}, container));
 		},
 
 		show: function() {
 			if (!this._visible) {
-				setStyle(this._contentContainer, "display", ["-webkit-box", "-moz-box"]);
+				this._contentContainer.show();
 				this._timer = setInterval(lang.hitch(this, "_animate"), 100);
 				this._visible = 1;
 			}
@@ -3662,7 +4307,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/sty
 		hide: function() {
 			clearTimeout(this._timer);
 			if (this._visible) {
-				setStyle(this._contentContainer, "display", "none");
+				this._contentContainer.hide();
 				this._visible = 0;
 			}
 		},
@@ -3690,29 +4335,53 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/sty
 
 		_messagePadding: 0,
 
-		_getContentSize: function(width, height) {
-			var msg = this._getMessage();
-			return {
-				width: 36 + this._measureText(msg, this._indicatorMessage).width + this._messagePadding,
-				height: Math.max(this._measureText(msg, this._indicatorMessage).height, 36)
-			};
-		},
-
-		_getMessage: function() {
-			return Locale._getString(this.messageid, this.message);
-		},
-
-		_renderMessage: function() {
-			var msg = this._getMessage();
-			this._messagePadding = msg ? 5 : 0;
-			setStyle(this._indicatorMessage, "paddingLeft", dom.unitize(this._messagePadding));
-			this._indicatorMessage.innerHTML = msg;
-			this._hasSizeDimensions() && this._triggerLayout();
-		},
-
 		properties: {
-			message: postMessage,
-			messageid: postMessage
+			color: {
+				set: function(value) {
+					return this._indicatorMessage.color = value;
+				}
+			},
+			font: {
+				set: function(value) {
+					return this._indicatorMessage.font = value;
+				}
+			},
+			indicatorColor: {
+				post: "_createProngs",
+				value: "#fff"
+			},
+			indicatorDiameter: {
+				post: "_createProngs",
+				value: 36
+			},
+			message: {
+				set: function(value) {
+					var indicatorMessage = this._indicatorMessage;
+					indicatorMessage.left = value ? 5 : 0;
+					return indicatorMessage.text = value;
+				}
+			},
+			messageid: {
+				set: function(value) {
+					var indicatorMessage = this._indicatorMessage;
+					indicatorMessage.left = value ? 5 : 0;
+					return indicatorMessage.textid = value;
+				}
+			},
+			style: {
+				set: function(value) {
+					if (~[ActivityIndicatorStyle.DARK, ActivityIndicatorStyle.BIG_DARK].indexOf(value)) {
+						this.indicatorColor = "#444";
+					} else {
+						this.indicatorColor = "#fff";
+					}
+					if (~[ActivityIndicatorStyle.BIG, ActivityIndicatorStyle.BIG_DARK].indexOf(value)) {
+						this.indicatorDiameter = 72;
+					} else {
+						this.indicatorDiameter = 36;
+					}
+				}
+			}
 		}
 
 	});
@@ -3724,20 +4393,18 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/sty
 
 define(
 	["Ti/_/browser", "Ti/_/css", "Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/_/style", "Ti/_/Evented",
-	"Ti/UI", "Ti/_/Gestures/DoubleTap","Ti/_/Gestures/LongPress","Ti/_/Gestures/Pinch","Ti/_/Gestures/SingleTap",
-	"Ti/_/Gestures/Swipe","Ti/_/Gestures/TouchCancel","Ti/_/Gestures/TouchEnd","Ti/_/Gestures/TouchMove",
-	"Ti/_/Gestures/TouchStart","Ti/_/Gestures/TwoFingerTap", "Ti/_/Promise"],
-	function(browser, css, declare, dom, event, lang, style, Evented, UI,
-		DoubleTap, LongPress, Pinch, SingleTap, Swipe, TouchCancel, TouchEnd,
-		TouchMove, TouchStart, TwoFingerTap, Promise) {
+	"Ti/UI", "Ti/_/Promise", "Ti/_/string"],
+	function(browser, css, declare, dom, event, lang, style, Evented, UI, Promise, string) {
 
-	var unitize = dom.unitize,
+	var global = window,
+		unitize = dom.unitize,
 		computeSize = dom.computeSize,
 		on = require.on,
 		setStyle = style.set,
 		isDef = lang.isDef,
 		val = lang.val,
 		is = require.is,
+		has = require.has,
 		transitionEvents = {
 			webkit: "webkitTransitionEnd",
 			trident: "msTransitionEnd",
@@ -3749,13 +4416,29 @@ define(
 		postDoBackground = {
 			post: "_doBackground"
 		},
+		postLayoutPropFunction = function(value, oldValue) {
+			(value === null || (!is(value,"String") && !is(value,"Number"))) && (value = void 0);
+			value !== oldValue && !this._batchUpdateInProgress && this._triggerLayout();
+			return value;
+		},
 		postLayoutProp = {
-			set: function(value, oldValue) {
-				if (value !== oldValue) {
-					!this._batchUpdateInProgress && this._triggerLayout();
-				}
-				return value;
-			}
+			set: postLayoutPropFunction
+		},
+		pixelUnits = "px",
+		gestureMapping = {
+			pinch: "Pinch",
+			swipe: "Swipe",
+			twofingertap: "TwoFingerTap",
+			doubletap: "DoubleTap",
+			longpress: "LongPress",
+			singletap: "SingleTap",
+			click: "SingleTap",
+			dragging: "Dragging",
+			doubleclick: "DoubleTap",
+			touchstart: "TouchStart",
+			touchend: "TouchEnd",
+			touchmove: "TouchMove",
+			touchcancel: "TouchCancel"
 		};
 
 	return declare("Ti._.UI.Element", Evented, {
@@ -3766,6 +4449,7 @@ define(
 
 		constructor: function(args) {
 			var self = this,
+				touchMoveBlocked = false,
 
 				node = this.domNode = this._setFocusNode(dom.create(this.domType || "div", {
 					className: "TiUIElement " + css.clean(this.declaredClass),
@@ -3773,40 +4457,17 @@ define(
 				})),
 
 				// Handle click/touch/gestures
-				recognizers = this._gestureRecognizers = {
-					Pinch: new Pinch,
-					Swipe: new Swipe,
-					TwoFingerTap: new TwoFingerTap,
-					DoubleTap: new DoubleTap,
-					LongPress: new LongPress,
-					SingleTap: new SingleTap,
-					TouchStart: new TouchStart,
-					TouchEnd: new TouchEnd,
-					TouchMove: new TouchMove,
-					TouchCancel: new TouchCancel
-				},
+				recognizers = this._gestureRecognizers = {},
 
-				// Each event could require a slightly different precedence of execution, which is why we have these separate lists.
-				// For now they are the same, but I suspect they will be different once the android-iphone parity is determined.
-				touchRecognizers = {
-					Start: recognizers,
-					Move: recognizers,
-					End: recognizers,
-					Cancel: recognizers
-				},
-
-				useTouch = "ontouchstart" in window,
-				bg = lang.hitch(this, "_doBackground");
-
-			require.has("devmode") && args && args._debug && dom.attr.set(node, "data-debug", args._debug);
+				useTouch = "ontouchstart" in global;
 
 			function processTouchEvent(eventType, evt) {
 				var i,
-					gestureRecognizers = touchRecognizers[eventType],
-					eventType = "Touch" + eventType + "Event",
 					touches = evt.changedTouches;
-				if (this._preventDefaultTouchEvent) {
-					this._preventDefaultTouchEvent && evt.preventDefault && evt.preventDefault();
+				if (!self._preventDefaultTouchEvent) {
+					evt.skipPreventDefault = 1;
+				} else if (!evt.skipPreventDefault) {
+					evt.preventDefault && evt.preventDefault();
 					for (i in touches) {
 						touches[i].preventDefault && touches[i].preventDefault();
 					}
@@ -3816,40 +4477,90 @@ define(
 					targetTouches: [],
 					changedTouches: [evt]
 				});
-				for (i in gestureRecognizers) {
-					gestureRecognizers[i]["process" + eventType](evt, self);
+				for (i in recognizers) {
+					recognizers[i].recognizer["process" + eventType](evt, self);
 				}
-				for (i in gestureRecognizers) {
-					gestureRecognizers[i]["finalize" + eventType]();
+				for (i in recognizers) {
+					recognizers[i].recognizer["finalize" + eventType]();
 				}
 			}
 
 			this._touching = false;
 
-			on(this.domNode, useTouch ? "touchstart" : "mousedown", function(evt){
+			this._children = [];
+
+			this._disconnectTouchEvent = on(this.domNode, useTouch ? "touchstart" : "mousedown", function(evt){
 				var handles = [
-					on(window, useTouch ? "touchmove" : "mousemove", function(evt){
-						(useTouch || self._touching) && processTouchEvent("Move", evt);
+					on(global, useTouch ? "touchmove" : "mousemove", function(evt){
+						if (!touchMoveBlocked) {
+							touchMoveBlocked = true;
+							(useTouch || self._touching) && processTouchEvent("TouchMoveEvent", evt);
+							setTimeout(function(){
+								touchMoveBlocked = false;
+							}, 30);
+						}
 					}),
-					on(window, useTouch ? "touchend" : "mouseup", function(evt){
+					on(global, useTouch ? "touchend" : "mouseup", function(evt){
 						self._touching = false;
-						processTouchEvent("End", evt);
+						processTouchEvent("TouchEndEvent", evt);
 						event.off(handles);
 					}),
-					useTouch && on(window, "touchcancel", function(evt){
-						processTouchEvent("Cancel", evt);
+					useTouch && on(global, "touchcancel", function(evt){
+						processTouchEvent("TouchCancelEvent", evt);
 						event.off(handles);
 					})
 				];
 				self._touching = true;
-				processTouchEvent("Start", evt);
+				processTouchEvent("TouchStartEvent", evt);
 			});
 
-			this.addEventListener("touchstart", bg);
-			this.addEventListener("touchend", bg);
+			on(this, "touchstart", this, "_doBackground");
+			on(this, "touchend", this, "_doBackground");
 
-			// TODO: mixin JSS rules (http://jira.appcelerator.org/browse/TIMOB-6780)
 			var values = this.constants.__values__;
+			this._layoutCoefficients = {
+				width: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				minWidth: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				sandboxWidth: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				height: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				minHeight: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				sandboxHeight: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				left: {
+					x1: 0,
+					x2: 0,
+					x3: 0
+				},
+				top: {
+					x1: 0,
+					x2: 0,
+					x3: 0,
+					x4: 0
+				}
+			};
 			values.size = {
 				x: 0,
 				y: 0,
@@ -3864,35 +4575,68 @@ define(
 			};
 		},
 
+		addEventListener: function(name, handler) {
+			if (name in gestureMapping) {
+				var gestureRecognizers = this._gestureRecognizers,
+					gestureRecognizer;
+				
+				if (!(name in gestureRecognizers)) {
+					gestureRecognizers[name] = {
+						count: 0,
+						recognizer: new (require("Ti/_/Gestures/" + gestureMapping[name]))(name)
+					};
+				}
+				
+				gestureRecognizers[name].count++;
+			}
+			handler && Evented.addEventListener.apply(this, arguments);
+		},
+
+		removeEventListener: function(name) {
+			if (name in gestureMapping) {
+				var gestureRecognizers = this._gestureRecognizers;
+				if (name in gestureRecognizers && !(--gestureRecognizers[name].count)) {
+					delete gestureRecognizers[name];
+				}
+			}
+			Evented.removeEventListener.apply(this, arguments);
+		},
+
 		_setParent: function(view) {
 			this._parent = view;
 		},
-		
-		_add: function(view) {
+
+		_add: function(view, hidden) {
+
+			view._hidden = hidden;
+
 			view._setParent(this);
-			this.children.push(view);
+
+			this._children.push(view);
 			this.containerNode.appendChild(view.domNode);
-			view._hasBeenLaidOut = false;
-			this._triggerLayout(this._isAttachedToActiveWin());
+
+			view._triggerLayout();
 		},
 
-		_insertAt: function(view,index) {
-			if (index > this.children.length || index < 0) {
+		_insertAt: function(view, index, hidden) {
+			var children = this._children;
+			if (index > children.length || index < 0) {
 				return;
-			} else if (index === this.children.length) {
-				this.add(view);
+			} else if (index === children.length) {
+				this._add(view, hidden);
 			} else {
 				view._parent = this;
-				this.containerNode.insertBefore(view.domNode,this.children[index].domNode);
-				this.children.splice(index,0,view);
+				this.containerNode.insertBefore(view.domNode, children[index].domNode);
+				children.splice(index,0,view);
 				this._triggerLayout();
 			}
 		},
 
 		_remove: function(view) {
-			var p = this.children.indexOf(view);
+			var children = this._children,
+				p = children.indexOf(view);
 			if (p !== -1) {
-				this.children.splice(p, 1);
+				children.splice(p, 1);
 				view._setParent();
 				dom.detach(view.domNode);
 				this._triggerLayout();
@@ -3900,7 +4644,7 @@ define(
 		},
 
 		_removeAllChildren: function(view) {
-			var children = this.children;
+			var children = this._children;
 			while (children.length) {
 				this.remove(children[0]);
 			}
@@ -3909,6 +4653,11 @@ define(
 
 		destroy: function() {
 			if (this._alive) {
+				var children = this._children;
+				this._disconnectTouchEvent();
+				while (children.length) {
+					children.splice(0, 1)[0].destroy();
+				}
 				this._parent && this._parent._remove(this);
 				if (this.domNode) {
 					dom.destroy(this.domNode);
@@ -3917,8 +4666,6 @@ define(
 			}
 			Evented.destroy.apply(this, arguments);
 		},
-		
-		_markedForLayout: false,
 		
 		_isAttachedToActiveWin: function() {
 			// If this element is not attached to an active window, skip the calculation
@@ -3934,420 +4681,58 @@ define(
 			return isAttachedToActiveWin;
 		},
 		
+		_needsMeasuring: true,
+		
 		_triggerLayout: function(force) {
+			this._needsMeasuring = true;
 			this._isAttachedToActiveWin() && (!this._batchUpdateInProgress || force) && UI._triggerLayout(this, force);
 		},
 		
-		_getInheritedWidth: function() {
-			var parent = this._parent,
-				parentWidth;
-			if (parent) {
-				parentWidth = lang.val(parent.width,parent._defaultWidth);
-				return parentWidth === UI.INHERIT ? parent._getInheritedWidth() : parentWidth;
-			}
-		},
-		
-		_getInheritedHeight: function(node) {
-			var parent = this._parent,
-				parentHeight;
-			if (parent) {
-				parentHeight = lang.val(parent.height,parent._defaultHeight);
-				return parentHeight === UI.INHERIT ? parent._getInheritedHeight() : parentHeight;
-			}
-		},
-		
 		_hasSizeDimensions: function() {
-			var width = this._getInheritedWidth(),
-				height = this._getInheritedHeight()
-			return (this._width === UI.SIZE || width === UI.SIZE) || 
-				(this._height === UI.SIZE || height === UI.SIZE);
+			return this._hasSizeWidth() || this._hasSizeHeight();
 		},
 		
-		_hasFillWidth: function() {
-			var width = this.width;
-			if (isDef(width)) {
-				if (width === UI.INHERIT) {
-					return this._getInheritedWidth() === UI.FILL;
-				}
-				return width === UI.FILL;
-			}
-			if (isDef(this.left) + isDef(this.right) + !!(this.center && isDef(this.center.x)) > 1) {
-				return false;
-			}
-			if (this._defaultWidth === UI.FILL) {
-				return true;
-			}
-			if (this._defaultWidth === UI.INHERIT) {
-				return this._getInheritedWidth() === UI.FILL;
-			}
+		_hasSizeHeight: function() {
+			return isNaN(this._layoutCoefficients.height.x1);
 		},
 		
-		_hasFillHeight: function() {
-			var height = this.height;
-			if (isDef(height)) {
-				if (height === UI.INHERIT) {
-					return this._getInheritedHeight() === UI.FILL;
-				}
-				return height === UI.FILL;
-			}
-			if (isDef(this.top) + isDef(this.bottom) + !!(this.center && isDef(this.center.y)) > 1) {
-				return false;
-			}
-			if (this._defaultHeight === UI.FILL) {
-				return true;
-			}
-			if (this._defaultHeight === UI.INHERIT) {
-				return this._getInheritedHeight() === UI.FILL;
-			}
-		},
-		
-		_hasBeenLaidOut: false,
-		
-		_isDependentOnParent: function(){
-			function isPercent(value) {
-				return /%$/.test("" + value);
-			}
-			var centerX = this.center && this.center.x,
-				centerY = this.center && this.center.y,
-				width = this._getInheritedWidth(),
-				height = this._getInheritedHeight();
-			return !!(isPercent(width) || isPercent(height) || isPercent(this.top) || isPercent(this.bottom) || 
-				isPercent(this.left) || isPercent(this.right) || isPercent(centerX) || isPercent(centerY) || 
-				this._hasFillWidth() || this._hasFillHeight() ||
-				(!isDef(this.left) && !isDef(centerX) && !isDef(this.right) && this._parent && this._parent._layout._defaultHorizontalAlignment !== "left") ||
-				(!isDef(this.top) && !isDef(centerY) && !isDef(this.bottom) && this._parent && this._parent._layout._defaultVerticalAlignment !== "top"));
+		_hasSizeWidth: function() {
+			return isNaN(this._layoutCoefficients.width.x1);
 		},
 		
 		startLayout: function() {
 			this._batchUpdateInProgress = true;
 		},
-		
+
 		finishLayout: function() {
 			this._batchUpdateInProgress = false;
 			UI._triggerLayout(this, true);
 		},
-		
+
 		updateLayout: function(params) {
 			this.startLayout();
-			for(var i in params) {
+			var i = 0,
+				len = params.length;
+			for(; i < len; i++) {
 				this[i] = params[i];
 			}
 			this.finishLayout();
 		},
-		
-		_layoutParams: {
-		 	origin: {
-		 		x: 0,
-		 		y: 0
-		 	},
-		 	isParentSize: {
-		 		width: 0,
-		 		height: 0
-		 	},
-		 	boundingSize: {
-		 		width: 0,
-		 		height: 0
-		 	},
-		 	alignment: {
-		 		horizontal: "center",
-		 		vertical: "center"
-		 	}
-	 	},
 
-		_doLayout: function(params) {
-			
-			this._layoutParams = params;
-			
-			var dimensions = this._computeDimensions({
-					layoutParams: params,
-					position: {
-						left: this.left,
-						top: this.top,
-						right: this.right,
-						bottom: this.bottom,
-						center: this.center
-					},
-					size: {
-						width: this.width,
-						height: this.height
-					},
-					layoutChildren: params.layoutChildren
-				});
-				
-			if (params.positionElement) {
-				UI._elementLayoutCount++;
-				
-				// Set and store the dimensions
-				var styles = {
-					zIndex: this.zIndex | 0
-				};
-				styles.left = unitize(this._measuredLeft = dimensions.left);
-				styles.top = unitize(this._measuredTop = dimensions.top);
-				styles.width = unitize(this._measuredWidth = dimensions.width);
-				styles.height = unitize(this._measuredHeight = dimensions.height);
-				this._measuredRightPadding = dimensions.rightPadding;
-				this._measuredBottomPadding = dimensions.bottomPadding;
-				this._measuredBorderSize = dimensions.borderSize;
-				this._measuredEffectiveWidth = dimensions.effectiveWidth;
-				this._measuredEffectiveHeight = dimensions.effectiveHeight;
-				setStyle(this.domNode, styles);
-			
-				this._markedForLayout = false;
-				this._hasBeenLaidOut = true;
-				
-				// Recompute the gradient, if it exists
-				this.backgroundGradient && this._computeGradient();
-				
-				this.fireEvent("postlayout");
-			}
-			
-			return dimensions;
-		},
-
-		_computeDimensions: function(params) {
-			
-			var layoutParams = params.layoutParams,
-				boundingWidth = layoutParams.boundingSize.width,
-				boundingHeight = layoutParams.boundingSize.height,
-				position = params.position,
-				size  = params.size,
-				
-				// Compute as many sizes as possible, should be everything except SIZE values for width and height and undefined values
-				left = computeSize(position.left, boundingWidth, 1),
-				top = computeSize(position.top, boundingHeight, 1),
-				originalRight = computeSize(position.right, boundingWidth),
-				originalBottom = computeSize(position.bottom, boundingHeight),
-				centerX = position.center && computeSize(position.center.x, boundingWidth, 1),
-				centerY = position.center && computeSize(position.center.y, boundingHeight, 1),
-				width = computeSize(size.width === UI.INHERIT ? this._getInheritedWidth() : size.width, boundingWidth),
-				height = computeSize(size.height === UI.INHERIT ? this._getInheritedHeight() : size.height, boundingHeight),
-
-				// Convert right/bottom coordinates to be with respect to (0,0)
-				right = layoutParams.rightIsMargin ? void 0 : isDef(originalRight) ? (boundingWidth - originalRight) : void 0,
-				bottom = layoutParams.bottomIsMargin ? void 0 : isDef(originalBottom) ? (boundingHeight - originalBottom) : void 0,
-				
-				// Calculate the "padding"
-				rightPadding = is(originalRight,"Number") ? originalRight : 0,
-				bottomPadding = is(originalBottom,"Number") ? originalBottom : 0,
-				origin = layoutParams.origin;
-			
-			is(width,"Number") && (width = Math.max(width,0));
-			is(height,"Number") && (height = Math.max(height,0));
-
-			// Unfortunately css precidence doesn't match the titanium, so we have to handle precedence and default setting ourselves
-			var defaultWidth = this._defaultWidth;
-			if (isDef(width)) {
-				if (isDef(left)) {
-					right = void 0;
-				} else if (isDef(centerX)){
-					if (width === UI.SIZE) {
-						left = "calculateDefault";
-					} else {
-						left = centerX - width / 2;
-						right = void 0;
-					}
-				} else if (!isDef(right)){
-					// Set the default position
-					left = "calculateDefault";
-				}
-			} else {
-				if (isDef(centerX)) {
-					if (isDef(left)) {
-						width = (centerX - left) * 2;
-						right = void 0;
-					} else if (isDef(right)) {
-						width = (right - centerX) * 2;
-					} else {
-						// Set the default width
-						width = computeSize(defaultWidth === UI.INHERIT ? this._getInheritedWidth() : defaultWidth, boundingWidth);
-					}
-				} else {
-					if (!isDef(left) || !isDef(right)) {
-						width = computeSize(defaultWidth === UI.INHERIT ? this._getInheritedWidth() : defaultWidth, boundingWidth);
-						if(!isDef(left) && !isDef(right)) {
-							// Set the default position
-							left = "calculateDefault";
-						}
-					}
-				}
-			}
-			var defaultHeight = this._defaultHeight;
-			if (isDef(height)) {
-				if (isDef(top)) {
-					bottom = void 0;
-				} else if (isDef(centerY)){
-					if(height === UI.SIZE) {
-						top = "calculateDefault";
-					} else {
-						top = centerY - height / 2;
-						bottom = void 0;
-					}
-				} else if (!isDef(bottom)) {
-					// Set the default position
-					top = "calculateDefault";
-				}
-			} else {
-				if (isDef(centerY)) {
-					if (isDef(top)) {
-						height = (centerY - top) * 2;
-						bottom = void 0;
-					} else if (isDef(bottom)) {
-						height = (bottom - centerY) * 2;
-					} else {
-						// Set the default height
-						height = computeSize(defaultHeight === UI.INHERIT ? this._getInheritedHeight() : defaultHeight, boundingHeight);
-					}
-				} else {
-					if (!isDef(top) || !isDef(bottom)) {
-						// Set the default height
-						height = computeSize(defaultHeight === UI.INHERIT ? this._getInheritedHeight() : defaultHeight, boundingHeight);
-						if(!isDef(top) && !isDef(bottom)) {
-							// Set the default position
-							top = "calculateDefault";
-						}
-					}
-				}
-			}
-			
-			// Calculate the border
-			function getValue(value) {
-				var value = parseInt(computedStyle[value]);
-				return isNaN(value) ? 0 : value;
-			}
-					
-			var computedStyle = window.getComputedStyle(this.domNode),
-				borderSize = {
-					left: getValue("border-left-width") + getValue("padding-left"),
-					top: getValue("border-top-width") + getValue("padding-top"),
-					right: getValue("border-right-width") + getValue("padding-right"),
-					bottom: getValue("border-bottom-width") + getValue("padding-bottom")
-				};
-				
-			function constrainValue(value, minValue, maxValue) {
-				return (isDef(minValue) && minValue > value ? minValue : // Apply the min width 
-					isDef(maxValue) && maxValue < value ? maxValue : value); // Apply the max width
-			}
-
-			// Calculate the width/left properties if width is NOT SIZE
-			var calculateWidthAfterChildren = false,
-				calculateHeightAfterChildren = false;
-			if (width === UI.SIZE) {
-				calculateWidthAfterChildren = true;
-			} else {
-				if (width === UI.FILL) {
-					if (isDef(left)) {
-						left === "calculateDefault" && (left = 0);
-						width = boundingWidth - left - rightPadding;
-					} else if (isDef(right)) {
-						width = right;
-					}
-				} else if (isDef(right)) {
-					if (isDef(left)) {
-						width = right - left;
-					} else {
-						left = right - width;
-					}
-				}
-				width = constrainValue(width, this._minWidth, this._maxWidth) - borderSize.left - borderSize.right;
-			}
-			if (height === UI.SIZE) {
-				calculateHeightAfterChildren = true;
-			} else {
-				if (height === UI.FILL) {
-					if (isDef(top)) {
-						top === "calculateDefault" && (top = 0);
-						height = boundingHeight - top - bottomPadding;
-					} else if (isDef(bottom)) {
-						height = bottom;
-					}
-				} else if (isDef(bottom)) {
-					if (isDef(top)) {
-						height = bottom - top;
-					} else {
-						top = bottom - height;
-					}
-				}
-				height = constrainValue(height, this._minHeight, this._maxHeight) - borderSize.top - borderSize.bottom;
-			}
-
-			if (this._getContentSize) {
-				var contentSize = this._getContentSize();
-				width === UI.SIZE && (width = contentSize.width);
-				height === UI.SIZE && (height = contentSize.height);
-			} else {
-				var computedSize;
-				if (params.layoutChildren) {
-					computedSize = this._layout._doLayout(this,is(width,"Number") ? width : boundingWidth,is(height,"Number") ? height : boundingHeight, !is(width,"Number"), !is(height,"Number"));
-				} else {
-					computedSize = this._layout._computedSize;
-				}
-				width === UI.SIZE && (width = constrainValue(computedSize.width, this._minWidth, this._maxWidth));
-				height === UI.SIZE && (height = constrainValue(computedSize.height, this._minHeight, this._maxHeight));
-			}
-			
-			if (calculateWidthAfterChildren) {
-				if (isDef(right) && !isDef(left)) {
-					left = right - width;
-				}
-			}
-			if (calculateHeightAfterChildren) {
-				if (isDef(bottom) && !isDef(top)) {
-					top = bottom - height;
-				}
-			}
-
-			// Set the default top/left if need be
-			if (left === "calculateDefault") {
-				if (!layoutParams.isParentSize.width) {
-					switch(layoutParams.alignment.horizontal) {
-						case "center": left = computeSize("50%",boundingWidth) - borderSize.left - (is(width,"Number") ? width : 0) / 2; break;
-						case "right": left = boundingWidth - borderSize.left - borderSize.right - (is(width,"Number") ? width : 0) / 2; break;
-						default: left = 0; // left
-					}
-				} else {
-					left = 0;
-				}
-			}
-			if (top === "calculateDefault") {
-				if (!layoutParams.isParentSize.height) {
-					switch(layoutParams.alignment.vertical) {
-						case "center": top = computeSize("50%",boundingHeight) - borderSize.top - (is(height,"Number") ? height : 0) / 2; break;
-						case "bottom": top = boundingWidth - borderSize.top - borderSize.bottom - (is(height,"Number") ? height : 0) / 2; break;
-						default: top = 0; // top
-					}
-				} else {
-					top = 0;
-				}
-			}
-			
-			return {
-				effectiveWidth: left + width + rightPadding + borderSize.left + borderSize.right,
-				effectiveHeight: top + height + bottomPadding + borderSize.top + borderSize.bottom,
-				left: Math.round(left + origin.x),
-				top: Math.round(top + origin.y),
-				rightPadding: Math.round(rightPadding),
-				bottomPadding: Math.round(bottomPadding),
-				width: Math.round(Math.max(width,0)),
-				height: Math.round(Math.max(height,0)),
-				borderSize: borderSize
-			};
-		},
-		
 		convertPointToView: function(point, destinationView) {
-			
 			// Make sure that both nodes are connected to the root
 			if (!this._isAttachedToActiveWin() || !destinationView._isAttachedToActiveWin()) {
 				return null;
 			}
-			
+
 			if (!point || !is(point.x,"Number") || !is(point.y,"Number")) {
 				throw new Error("Invalid point");
 			}
-			
+
 			if (!destinationView.domNode) {
 				throw new Error("Invalid destination view");
 			}
-			
+
 			function getAbsolutePosition(node, point, additive) {
 				var x = point.x,
 					y = point.y,
@@ -4361,19 +4746,18 @@ define(
 					
 				return {x: x, y: y};
 			}
-			
+
 			// Find this node's location relative to the root
-			return getAbsolutePosition(destinationView,getAbsolutePosition(this,point,true),false);
+			return getAbsolutePosition(destinationView, getAbsolutePosition(this,point,true),false);
 		},
 
 		// This method returns the offset of the content relative to the parent's location. 
 		// This is useful for controls like ScrollView that can move the children around relative to itself.
-		_getContentOffset: function(){
+		_getContentOffset: function() {
 			return {x: 0, y: 0};
 		},
-		
+
 		_computeGradient: function() {
-			
 			var backgroundGradient = this.backgroundGradient;
 				colors = backgroundGradient.colors,
 				type = backgroundGradient.type,
@@ -4471,7 +4855,7 @@ define(
 					if (!is(color.offset,"Number")) {
 						color.offset = i / (numColors - 1);
 					}
-					cssVal += "," + color.color + " " + Math.round(computeSize(100 * color.offset + "%", userGradientEnd - userGradientStart) + userGradientStart) + "px";
+					cssVal += "," + color.color + " " + Math.round(computeSize(100 * color.offset + "%", userGradientEnd - userGradientStart) + userGradientStart) + pixelUnits;
 				}
 				
 			} else if (type === "radial") {
@@ -4504,7 +4888,7 @@ define(
 					}
 				}
 				
-				cssVal += startPointX + "px " + startPointY + "px";
+				cssVal += startPointX + pixelUnits + " " + startPointY + pixelUnits;
 				
 				// Calculate the color stops
 				for (var i = 0; i < numColors; i++) {
@@ -4518,23 +4902,24 @@ define(
 					} else {
 						offset = mirrorGradient ? numColors % 2 === 1 && i === Math.floor(numColors / 2) ? color.offset : 1 - color.offset : color.offset;
 					}
-					cssVal += "," + color.color + " " + Math.round(computeSize(100 * offset + "%", endRadius - startRadius) + startRadius) + "px";
+					cssVal += "," + color.color + " " + Math.round(computeSize(100 * offset + "%", endRadius - startRadius) + startRadius) + pixelUnits;
 				}
 			}
 
-			cssVal += ")";
-
-			require.each(require.config.vendorPrefixes.css, lang.hitch(this,function(vendorPrefix) {
-				setStyle(this.domNode, "backgroundImage", vendorPrefix + cssVal);
-			}));
+			require.config.vendorPrefixes.css.forEach(function(vendorPrefix) {
+				setStyle(this.domNode, "backgroundImage", vendorPrefix + cssVal + ")");
+			}, this);
 		},
-		
+
 		_preventDefaultTouchEvent: true,
 
 		_isGestureBlocked: function(gesture) {
-			for (var recognizer in this._gestureRecognizers) {
-				var blockedGestures = this._gestureRecognizers[recognizer].blocking;
-				for (var blockedGesture in blockedGestures) {
+			var recognizer,
+				blockedGestures,
+				blockedGesture;
+			for (recognizer in this._gestureRecognizers) {
+				blockedGestures = this._gestureRecognizers[recognizer].blocking;
+				for (blockedGesture in blockedGestures) {
 					if (gesture === blockedGestures[blockedGesture]) {
 						return true;
 					}
@@ -4544,7 +4929,21 @@ define(
 		},
 
 		_handleTouchEvent: function(type, e) {
-			this.enabled && this.fireEvent(type, e);
+			if (this.enabled) {
+				// Normalize the location of the event.
+				var pt, x, y;
+				if (is(e.x, "Number") && is(e.y, "Number")) {
+					pt = UI._container.convertPointToView({
+						x: e.x,
+						y: e.y
+					}, e.source || this) || {};
+					x = pt.x;
+					y = pt.y;
+				}
+				e.x = x;
+				e.y = y;
+				this.fireEvent(type, e);
+			}
 		},
 		
 		_defaultBackgroundColor: void 0,
@@ -4562,34 +4961,72 @@ define(
 		_defaultBackgroundSelectedColor: void 0,
 		
 		_defaultBackgroundSelectedImage: void 0,
+		
+		_borderLeftWidth: 0,
+		
+		_borderRightWidth: 0,
+		
+		_borderTopWidth: 0,
+		
+		_borderBottomWidth: 0,
+		
+		_getBorderFromCSS: function() {
+			setTimeout(lang.hitch(this, function () {
+				var computedStyle = global.getComputedStyle(this.domNode),
+					left = parseInt(computedStyle["border-left-width"]),
+					right = parseInt(computedStyle["border-right-width"]),
+					top = parseInt(computedStyle["border-top-width"]),
+					bottom = parseInt(computedStyle["border-bottom-width"]);
+				
+				if (!(isNaN(left) || isNaN(right) || isNaN(top) || isNaN(bottom))) {
+						if (left === right && left === top && left === bottom) {
+							this.borderWidth = left;
+						} else {
+							this.borderWidth = [left, right, top, bottom];
+						}
+				}
+			}), 1);
+		},
 
 		_doBackground: function(evt) {
-			var evt = evt || {},
-				m = (evt.type || "").match(/mouse(over|out)/),
-				node = this.domNode,
-				bi = this.backgroundImage || this._defaultBackgroundImage || "none",
-				bc = this.backgroundColor || this._defaultBackgroundColor;
+			if (!this.backgroundGradient) {
+				var evt = evt || {},
+					m = (evt.type || "").match(/mouse(over|out)/),
+					bi = this.backgroundImage || this._defaultBackgroundImage || "none",
+					bc = this.backgroundColor || this._defaultBackgroundColor,
+					repeat = this.backgroundRepeat,
+					nodeStyle = this.domNode.style,
+					tmp;
 
-			if (this._touching) {
-				bc = this.backgroundSelectedColor || this._defaultBackgroundSelectedColor || bc;
-				bi = this.backgroundSelectedImage || this._defaultBackgroundSelectedImage || bi;
+				if (this._touching) {
+					bc = this.backgroundSelectedColor || this._defaultBackgroundSelectedColor || bc;
+					bi = this.backgroundSelectedImage || this._defaultBackgroundSelectedImage || bi;
+				}
+
+				m && (this._over = m[1] === "over");
+				if (!this._touching && this.focusable && this._over) {
+					bc = this.backgroundFocusedColor || this._defaultBackgroundFocusedColor || bc;
+					bi = this.backgroundFocusedImage || this._defaultBackgroundFocusedImage || bi;
+				}
+
+				if (!this.enabled) {
+					bc = this.backgroundDisabledColor || this._defaultBackgroundDisabledColor || bc;
+					bi = this.backgroundDisabledImage || this._defaultBackgroundDisabledImage || bi;
+				}
+
+				bc = bc || (bi && bi !== "none" ? "transparent" : "");
+				nodeStyle.backgroundColor.toLowerCase() !== bc.toLowerCase() && (nodeStyle.backgroundColor = bc);
+
+				bi = style.url(bi);
+				nodeStyle.backgroundImage.replace(/'|"/g, '').toLowerCase() !== bi.toLowerCase() && (nodeStyle.backgroundImage = bi);
+
+				if (bi) {
+					tmp = repeat ? "repeat" : "no-repeat";
+					nodeStyle.backgroundRepeat !== tmp && (nodeStyle.backgroundRepeat = tmp);
+					tmp = repeat ? "auto" : "100%";
+					nodeStyle.backgroundSize.replace(/(100%) 100%/, "$1") !== tmp && (nodeStyle.backgroundSize = tmp);
+				}
 			}
-
-			m && (this._over = m[1] === "over");
-			if (!this._touching && this.focusable && this._over) {
-				bc = this.backgroundFocusedColor || this._defaultBackgroundFocusedColor || bc;
-				bi = this.backgroundFocusedImage || this._defaultBackgroundFocusedImage || bi;
-			}
-
-			if (!this.enabled) {
-				bc = this.backgroundDisabledColor || this._defaultBackgroundDisabledColor || bc;
-				bi = this.backgroundDisabledImage || this._defaultBackgroundDisabledImage || bi;
-			}
-
-			!this.backgroundGradient && setStyle(node, {
-				backgroundColor: bc || (bi && bi !== "none" ? "transparent" : ""),
-				backgroundImage: style.url(bi)
-			});
 		},
 
 		_setFocusNode: function(node) {
@@ -4603,18 +5040,7 @@ define(
 				f.node = node;
 				f.evts = [
 					on(node, "focus", this, "_doBackground"),
-					on(node, "blur", this, "_doBackground") /*,
-					on(node, "mouseover", this, function() {
-						this._doBackground();
-						f.evtsMore = [
-							on(node, "mousemove", this, "_doBackground"),
-							on(node, "mouseout", this, function() {
-								this._doBackground();
-								event.off(f.evtsMore);
-								f.evtsMore = [];
-							})
-						];
-					})*/
+					on(node, "blur", this, "_doBackground")
 				];
 			}
 
@@ -4630,118 +5056,105 @@ define(
 		},
 
 		animate: function(anim, callback) {
-			if (UI._layoutInProgress) {
-				on.once(UI,"postlayout", lang.hitch(this,function(){
-					this._doAnimation(anim,callback);
+			if (UI._layoutInProgress || !this._isAttachedToActiveWin()) {
+				on.once(UI,"postlayout", lang.hitch(this, function(){
+					this._doAnimation(anim, callback);
 				}));
 			} else {
-				this._doAnimation(anim,callback);
+				this._doAnimation(anim, callback);
 			}
 		},
-		
+
 		_doAnimation: function(anim, callback) {
-			var anim = anim || {},
-				curve = curves[anim.curve] || "ease",
-				fn = lang.hitch(this, function() {
+			anim = anim || {};
+			var curve = curves[anim.curve] || "ease",
+				self = this,
+				fn = function() {
+
+					// It is possible for the asynchronicity of animations to leave us in a state where the element was removed from its parent mid-animation
+					if (!self._parent) {
+						return;
+					}
+
 					var transformCss = "";
 
 					// Set the color and opacity properties
-					anim.backgroundColor !== void 0 && (this.backgroundColor = anim.backgroundColor);
-					anim.opacity !== void 0 && setStyle(this.domNode, "opacity", anim.opacity);
-					setStyle(this.domNode, "display", anim.visible !== void 0 && !anim.visible ? "none" : "");
-					
-					// Set the position and size properties
-					
-					if (!["left", "top", "right", "bottom", "center", "width", "height"].every(function(v) { return !isDef(anim[v]); })) {
-						// TODO set border width here
+					anim.backgroundColor !== void 0 && (self.backgroundColor = anim.backgroundColor);
+					anim.opacity !== void 0 && setStyle(self.domNode, "opacity", anim.opacity);
+					setStyle(self.domNode, "display", anim.visible !== void 0 && !anim.visible ? "none" : "");
 
-						var dimensions = this._computeDimensions({
-							layoutParams: this._layoutParams,
-							position: {
-								left: val(anim.left, this.left),
-								top: val(anim.top, this.top),
-								right: val(anim.right, this.right),
-								bottom: val(anim.bottom, this.bottom),
-								center: anim.center || this.center
-							},
-							size: {
-								width: val(anim.width, this.width),
-								height: val(anim.height, this.height)
-							},
-							layoutChildren: false
-						});
-	
-						setStyle(this.domNode, {
-							left: unitize(dimensions.left),
-							top: unitize(dimensions.top),
-							width: unitize(dimensions.width),
-							height: unitize(dimensions.height),
-							borderLeftWidth: unitize(dimensions.borderSize.left),
-							borderTopWidth: unitize(dimensions.borderSize.top),
-							borderRightWidth: unitize(dimensions.borderSize.right),
-							borderBottomWidth: unitize(dimensions.borderSize.bottom)
-						});
+					// Set the position and size properties
+					if (!["left", "top", "right", "bottom", "center", "width", "height", "borderWidth"].every(function(v) { return !isDef(anim[v]); })) {
+						self._parent._layout.calculateAnimation(self, anim); // Guaranteed a parent because of the _isAttachedToActiveWin check in animate()
 					}
 
 					// Set the z-order
-					!isDef(anim.zIndex) && setStyle(this.domNode, "zIndex", anim.zIndex);
+					!isDef(anim.zIndex) && setStyle(self.domNode, "zIndex", anim.zIndex);
 
 					// Set the transform properties
 					if (anim.transform) {
-						this._curTransform = this._curTransform ? this._curTransform.multiply(anim.transform) : anim.transform;
-						transformCss = this._curTransform.toCSS();
+						self._curTransform = self._curTransform ? self._curTransform.multiply(anim.transform) : anim.transform;
+						transformCss = self._curTransform.toCSS();
 					}
 
-					setStyle(this.domNode, "transform", transformCss);
-				});
+					setStyle(self.domNode, "transform", transformCss);
+				};
 
 			anim.duration = anim.duration || 0;
 			anim.delay = anim.delay || 0;
-			anim.transform && setStyle(this.domNode, "transform", "");
+			anim.transform && setStyle(self.domNode, "transform", "");
 			anim.start && anim.start();
 
 			if (anim.duration > 0) {
-				// Create the transition, must be set before setting the other properties
-				setStyle(this.domNode, "transition", "all " + anim.duration + "ms " + curve + (anim.delay ? " " + anim.delay + "ms" : ""));
-				on.once(window, transitionEnd, lang.hitch(this, function(e) {
-					if (!this._destroyed) {
+				function completeAnimation(){
+					if (!self._destroyed) {
 						// Clear the transform so future modifications in these areas are not animated
-						setStyle(this.domNode, "transition", "");
+						setStyle(self.domNode, "transition", "");
 						is(anim.complete, "Function") && anim.complete();
-						is(callback, "Function") && callback();
+						is(callback, "Function") && callback.call(self);
 					}
-				}));
+				}
+				
+				// Create the transition, must be set before setting the other properties
+				if (style.supports("transition", self.domNode)) {
+					setStyle(self.domNode, "transition", "all " + anim.duration + "ms " + curve + (anim.delay ? " " + anim.delay + "ms" : ""));
+					on.once(global, transitionEnd, function(e) {
+						completeAnimation();
+					});
+				} else {
+					setTimeout(completeAnimation,anim.duration);
+				}
 				setTimeout(fn, 0);
 			} else {
 				fn();
 				is(anim.complete, "Function") && anim.complete();
-				is(callback, "Function") && callback();
+				is(callback, "Function") && callback.call(self);
 			}
 		},
 
 		_setTouchEnabled: function(value) {
+			var children = this._children,
+				child,
+				i = 0,
+				len = children.length;
 			setStyle(this.domNode, "pointerEvents", value ? "auto" : "none");
-			if (!value) {
-				for (var i in this.children) {
-					this.children[i]._setTouchEnabled(value);
-				}
+			for (; i < len; i++) {
+				child = children[i];
+				child._setTouchEnabled(value && child.touchEnabled);
 			}
 		},
-
+		
 		_measuredLeft: 0,
+		
 		_measuredTop: 0,
-		_measuredRightPadding: 0,
-		_measuredBottomPadding: 0,
+		
 		_measuredWidth: 0,
+		
 		_measuredHeight: 0,
-		_measuredBorderSize: {
-			value: {
-				left: 0,
-				top: 0,
-				right: 0,
-				bottom: 0
-			}
-		},
+		
+		_measuredSandboxWidth: 0,
+		
+		_measuredSandboxHeight: 0,
 		
 		constants: {
 			size: {
@@ -4757,8 +5170,8 @@ define(
 			rect: {
 				get: function() {
 					return {
-						x: this._measuredTop,
-						y: this._measuredLeft,
+						x: this._measuredLeft,
+						y: this._measuredTop,
 						width: this._measuredWidth,
 						height: this._measuredHeight
 					};
@@ -4824,6 +5237,8 @@ define(
 
 			backgroundImage: postDoBackground,
 
+			backgroundRepeat: postDoBackground,
+
 			backgroundSelectedColor: postDoBackground,
 
 			backgroundSelectedImage: postDoBackground,
@@ -4844,10 +5259,29 @@ define(
 			},
 
 			borderWidth: {
-				set: function(value) {
-					setStyle(this.domNode, "borderWidth", unitize(value));
+				set: function(value, oldValue) {
+					
+					if (is(value,"Array")) {
+						if (value.length !== 4) {
+							return oldValue;
+						}
+						setStyle(this.domNode, {
+							borderLeftWidth: (this._borderLeftWidth = value[0]) + pixelUnits,
+							borderRightWidth: (this._borderRightWidth = value[1]) + pixelUnits,
+							borderTopWidth: (this._borderTopWidth = value[2]) + pixelUnits,
+							borderBottomWidth: (this._borderBottomWidth = value[3]) + pixelUnits
+						});
+						this._borderSet = true;
+					} else if(isNaN(value)) {
+						return oldValue;
+					} else {
+						setStyle(this.domNode, "borderWidth", value + pixelUnits);
+						this._borderLeftWidth = this._borderRightWidth = this._borderTopWidth = this._borderBottomWidth = value;
+						this._borderSet = true;
+					}
 					return value;
 				},
+				post: postLayoutPropFunction,
 				value: 0
 			},
 
@@ -4947,11 +5381,11 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 		processTouchCancelEvent: function(e, element){
 			if (!element._isGestureBlocked(this.name)) {
 				for (var i = 0; i < e.changedTouches.length; i++) {
-					lang.hitch(element,element._handleTouchEvent(this.name,{
+					element,element._handleTouchEvent(this.name,{
 						x: e.changedTouches[i].clientX,
 						y: e.changedTouches[i].clientY,
 						source: this.getSourceNode(e,element)
-					}));
+					});
 				}
 			}
 		}
@@ -4963,158 +5397,130 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 "Ti/UI/TableView":function(){
 /* /titanium/Ti/UI/TableView.js */
 
-define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb/TableViewSeparatorStyle", "Ti/UI"], 
-	function(declare, View, style, lang, TableViewSeparatorStyle, UI) {
+define(["Ti/_/declare", "Ti/_/UI/KineticScrollView", "Ti/_/style", "Ti/_/lang", "Ti/UI/MobileWeb/TableViewSeparatorStyle", "Ti/UI"], 
+	function(declare, KineticScrollView, style, lang, TableViewSeparatorStyle, UI) {
 
 	var setStyle = style.set,
 		is = require.is,
 		isDef = lang.isDef,
-		refreshSections = function() {
-			this._refreshSections();
-		};
-		
-	return declare("Ti.UI.TableView", View, {
-		
+		regexpClickTap = /^(click|singletap)$/,
+
+		// The amount of deceleration (in pixels/ms^2)
+		deceleration = 0.001;
+
+	return declare("Ti.UI.TableView", KineticScrollView, {
+
 		constructor: function(args) {
-			
-			// Content must go in a separate container so the scrollbar can exist outside of it
-			var contentContainer = this._contentContainer = UI.createView({
+
+			var self = this,
+				scrollbarTimeout,
+				contentContainer;
+			self._initKineticScrollView(contentContainer = UI.createView({
 				width: UI.INHERIT,
-				height: UI.INHERIT,
+				height: UI.SIZE,
 				left: 0,
 				top: 0,
-				layout: 'vertical'
-			});
-			this.add(contentContainer);
-			setStyle(contentContainer.domNode,"overflow","hidden");
-			
-			// Use horizontal layouts so that the default location is always (0,0)
-			contentContainer.add(this._header = UI.createView({
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
+			}), "vertical", "vertical", 1);
+
+			contentContainer._add(self._header = UI.createView({
 				height: UI.SIZE, 
 				width: UI.INHERIT, 
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			contentContainer.add(this._sections = UI.createView({
+			contentContainer._add(self._sections = UI.createView({
 				height: UI.SIZE, 
 				width: UI.INHERIT, 
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			contentContainer.add(this._footer = UI.createView({
+			contentContainer._add(self._footer = UI.createView({
 				height: UI.SIZE, 
 				width: UI.INHERIT, 
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			
-			this.data = [];
-			
-			this._createVerticalScrollBar();
-			
-			var self = this;
-			function getContentHeight() {
-				return self._header._measuredHeight + self._sections._measuredHeight + self._footer._measuredHeight;
+
+			self.data = [];
+		},
+
+		_handleMouseWheel: function() {
+			this._fireScrollEvent("scroll");
+		},
+
+		_handleDragStart: function(e) {
+			this.fireEvent("dragStart");
+		},
+
+		_handleDrag: function(e) {
+			this._fireScrollEvent("scroll", e);
+		},
+
+		_handleDragEnd: function(e, velocityX, velocityY) {
+			var self = this,
+				y = -self._currentTranslationY;
+			if (isDef(velocityY)) {
+				var distance = velocityY * velocityY / (1.724 * deceleration) * (velocityY < 0 ? -1 : 1),
+					duration = Math.abs(velocityY) / deceleration,
+					translation = Math.min(0, Math.max(self._minTranslationY, self._currentTranslationY + distance));
+				self.fireEvent("dragEnd",{
+					decelerate: true
+				});
+				self._animateToPosition(self._currentTranslationX, translation, duration, "ease-out", function() {
+					self._setTranslation(self._currentTranslationX, translation);
+					self._endScrollBars();
+					self._fireScrollEvent("scrollEnd", e);
+				});
 			}
 			
-			// Handle scrolling
-			var previousTouchLocation;
-			this.addEventListener("touchstart",function(e) {
-				previousTouchLocation = e.y;
-				
-				this._startScrollBars({
-					y: contentContainer.domNode.scrollTop / (getContentHeight() - this._measuredHeight)
-				},
-				{
-					y: contentContainer._measuredHeight / (getContentHeight())
-				});
-			});
-			this.addEventListener("touchend",function(e) {
-				previousTouchLocation = null;
-				
-				this._endScrollBars();
-				
-				// Create the scroll event
-				this._isScrollBarActive && this.fireEvent("scrollEnd",{
-					contentOffset: {x: 0, y: contentContainer.domNode.scrollTop + this._header._measuredHeight},
-					contentSize: {width: this._sections._measuredWidth, height: this._sections._measuredHeight},
-					size: {width: this._measuredWidth, height: this._measuredHeight},
-					x: e.x,
-					y: e.y
-				});
-			});
-			this.addEventListener("touchmove",lang.hitch(this,function(e) {
-				contentContainer.domNode.scrollTop += previousTouchLocation - e.y;
-				previousTouchLocation = e.y;
-				
-				this._updateScrollBars({
-					y: contentContainer.domNode.scrollTop / (getContentHeight() - this._measuredHeight)
-				});
-				
-				this._fireScrollEvent(e.x,e.y);
-			}));
-			this.domNode.addEventListener("mousewheel",function(e) {
-				self._startScrollBars({
-					y: contentContainer.domNode.scrollTop / (getContentHeight() - self._measuredHeight)
-				},
-				{
-					y: contentContainer._measuredHeight / (getContentHeight())
-				});
-				setTimeout(function(){
-					contentContainer.domNode.scrollLeft -= e.wheelDeltaX;
-					contentContainer.domNode.scrollTop -= e.wheelDeltaY;
-					self._updateScrollBars({
-						y: (contentContainer.domNode.scrollTop - e.wheelDeltaY) / (getContentHeight() - self._measuredHeight)
-					});
-					setTimeout(function(){
-						self._endScrollBars();
-					},10);
-				},10);
-			});
-			
-			require.on(contentContainer.domNode,"scroll",lang.hitch(this,function(e){
-				if (!this._touching) {
-					this._fireScrollEvent();
-				}
-			}));
 		},
-		
-		_fireScrollEvent: function(x,y) {
+
+		_fireScrollEvent: function(type, e) {
 			// Calculate the visible items
 			var firstVisibleItem,
 				visibleItemCount = 0,
-				scrollTop = this._contentContainer.scrollTop,
-				sections = this._sections.children;
-			for(var i = 0; i < sections.length; i+= 2) {
-				
+				contentContainer = this._contentContainer,
+				y = -this._currentTranslationY,
+				sections = this._sections,
+				sectionsList = sections._children,
+				len = sectionsList.length;
+			for(var i = 0; i < len; i+= 2) {
+
 				// Check if the section is visible
-				var section = sections[i],
-					sectionOffsetTop = section._measuredTop - scrollTop,
-					sectionOffsetBottom = section._measuredTop + section._measuredHeight - scrollTop;
-				if (sectionOffsetBottom > 0 && sectionOffsetTop < this._contentContainer._measuredHeight) {
-					
-					var rows = section._rows.children
+				var section = sectionsList[i],
+					sectionOffsetTop = y - section._measuredTop,
+					sectionOffsetBottom = section._measuredHeight - sectionOffsetTop;
+				if (sectionOffsetTop > 0 && sectionOffsetBottom > 0) {
+					var rows = section._rows._children
 					for (var j = 1; j < rows.length; j += 2) {
 						var row = rows[j],
-							rowOffsetTop = row._measuredTop + section._measuredTop - scrollTop,
-							rowOffsetBottom = row._measuredTop + row._measuredHeight + section._measuredTop - scrollTop;
-						if (rowOffsetBottom > 0 && rowOffsetTop < this._contentContainer._measuredHeight) {
+							rowOffsetTop = sectionOffsetTop - row._measuredTop,
+							rowOffsetBottom = row._measuredHeight - rowOffsetTop;
+						if (rowOffsetTop > 0 && rowOffsetBottom > 0) {
 							visibleItemCount++;
-							if (!firstVisibleItem) {
-								firstVisibleItem = row;
-							}
+							!firstVisibleItem && (firstVisibleItem = row);
 						}
 					}
 				}
 			}
-			
+
 			// Create the scroll event
-			this._isScrollBarActive && this.fireEvent("scroll",{
-				contentOffset: {x: 0, y: this._contentContainer.scrollTop},
-				contentSize: {width: this._sections._measuredWidth, height: this._sections._measuredHeight},
+			this.fireEvent(type, {
+				contentOffset: {
+					x: 0,
+					y: y
+				},
+				contentSize: {
+					width: sections._measuredWidth,
+					height: sections._measuredHeight
+				},
 				firstVisibleItem: firstVisibleItem,
-				size: {width: this._contentContainer._measuredWidth, height: this._contentContainer._measuredHeight},
+				size: {
+					width: contentContainer._measuredWidth,
+					height: contentContainer._measuredHeight
+				},
 				totalItemCount: this.data.length,
 				visibleItemCount: visibleItemCount,
-				x: x,
-				y: y
+				x: e && e.x,
+				y: e && e.y
 			});
 		},
 
@@ -5123,18 +5529,24 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		_defaultHeight: UI.FILL,
 		
 		_getContentOffset: function(){
-			return {x: this._contentContainer.scrollLeft, y: this._contentContainer.scrollTop};
+			return {
+				x: -this._currentTranslationX,
+				y: -this._currentTranslationY
+			};
 		},
 		
 		_handleTouchEvent: function(type, e) {
+			var i = 0,
+				index = 0,
+				localIndex,
+				sections = this._sections._children,
+				row = this._tableViewRowClicked,
+				section = this._tableViewSectionClicked;
 			if (type === "click" || type === "singletap") {
-				if (this._tableViewRowClicked && this._tableViewSectionClicked) {
-					e.row = this._tableViewRowClicked;
-					e.rowData = this._tableViewRowClicked;
-					var index = 0,
-						sections = this._sections.children;
-					for(var i = 0; i < sections.length; i+= 2) {
-						var localIndex = sections[i]._rows.children.indexOf(this._tableViewRowClicked);
+				if (row && section) {
+					
+					for (; i < sections.length; i += 2) {
+						localIndex = sections[i]._rows._children.indexOf(row);
 						if (localIndex !== -1) {
 							index += Math.floor(localIndex / 2);
 							break;
@@ -5142,19 +5554,21 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 							index += sections[i].rowCount;
 						}
 					}
+					e.row = e.rowData = row;
 					e.index = index;
-					e.section = this._tableViewSectionClicked;
+					e.section = section;
 					e.searchMode = false; 
-					View.prototype._handleTouchEvent.apply(this,arguments); // This intentionally squelches the event if a row was not click
+	
+					KineticScrollView.prototype._handleTouchEvent.apply(this, arguments);
+	
+					this._tableViewRowClicked = null;
+					this._tableViewSectionClicked = null;
 				}
 			} else {
-				View.prototype._handleTouchEvent.apply(this,arguments);
+				KineticScrollView.prototype._handleTouchEvent.apply(this, arguments);
 			}
 		},
-		
-		_tableViewRowClicked: null,
-		_tableViewSectionClicked: null,
-		
+
 		_createSeparator: function() {
 			var separator = UI.createView({
 				height: 1,
@@ -5178,8 +5592,8 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		},
 		
 		_refreshSections: function() {
-			for (var i = 0; i < this._sections.children.length; i += 2) {
-				this._sections.children[i]._refreshRows();
+			for (var i = 0; i < this._sections._children.length; i += 2) {
+				this._sections._children[i]._refreshRows();
 			}
 			this._triggerLayout();
 		},
@@ -5187,8 +5601,8 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		_calculateLocation: function(index) {
 			var currentOffset = 0,
 				section;
-			for(var i = 0; i < this._sections.children.length; i += 2) {
-				section = this._sections.children[i];
+			for(var i = 0; i < this._sections._children.length; i += 2) {
+				section = this._sections._children[i];
 				currentOffset += section.rowCount;
 				if (index < currentOffset) {
 					return {
@@ -5210,49 +5624,56 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		_insertRow: function(value, index) {
 			var location = this._calculateLocation(index);
 			if (location) {
-				location.section.add(value,location.localIndex);
+				location.section.add(value,location.localIndex); // We call the normal .add() method to hook into the sections proper add mechanism
 			}
+			this._publish(value);
 			this._refreshSections();
 		},
 		
 		_removeRow: function(index) {
 			var location = this._calculateLocation(index);
+			this._unpublish(location.section._rows._children[2 * location.localIndex + 1]);
 			if (location) {
 				location.section._removeAt(location.localIndex);
 			}
 		},
 
 		appendRow: function(value) {
-			this._currentSection.add(value);
+			if (!this._currentSection) {
+				this._sections._add(this._currentSection = UI.createTableViewSection({_tableView: this}));
+				this._sections._add(this._createSeparator());
+				this.data.push(this._currentSection);
+			}
+			this._currentSection.add(value); // We call the normal .add() method to hook into the sections proper add mechanism
+			this._publish(value);
 			this._refreshSections();
 		},
-		
+
 		deleteRow: function(index) {
 			this._removeRow(index);
 		},
-		
+
 		insertRowAfter: function(index, value) {
 			this._insertRow(value, index + 1);
 		},
-		
+
 		insertRowBefore: function(index, value) {
 			this._insertRow(value, index);
 		},
-		
+
 		updateRow: function(index, row) {
 			this._removeRow(index);
 			this._insertRow(row, index);
 		},
-		
+
 		scrollToIndex: function(index) {
 			var location = this._calculateLocation(index);
-			if (location) {
-				this._contentContainer.domNode.scrollTop = location.section._measuredTop + location.section._rows.children[2 * location.localIndex + 1]._measuredTop;
-			}
+			location && this._setTranslation(0,-location.section._measuredTop -
+				location.section._rows._children[2 * location.localIndex + 1]._measuredTop);
 		},
 		
 		scrollToTop: function(top) {
-			this._contentContainer.scrollTop = top;
+			this._setTranslation(0,-top);
 		},
 		
 		properties: {
@@ -5264,6 +5685,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 						
 						// Remove all of the previous sections
 						this._sections._removeAllChildren();
+						this._currentSection = void 0;
 						
 						// Convert any object literals to TableViewRow instances
 						for (var i in value) {
@@ -5271,30 +5693,24 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 								value[i] = UI.createTableViewRow(value[i]);
 							}
 						}
-						
-						// If there is no data, we still need to create a default section
-						if (value.length == 0) {
-							this._sections.add(this._currentSection = UI.createTableViewSection({_tableView: this}));
-							this._sections.add(this._createSeparator());
-							retval.push(this._currentSection);
-						}
 			
 						// Add each element
 						for (var i = 0; i < value.length; i++) {
 							if (value[i].declaredClass === "Ti.UI.TableViewRow") {
-								// Check if the first item is a row, meaning we need a default section
-								if (i === 0) {
-									this._sections.add(this._currentSection = UI.createTableViewSection({_tableView: this}));
-									this._sections.add(this._createSeparator());
+								// Check if we need a default section
+								if (!this._currentSection) {
+									this._sections._add(this._currentSection = UI.createTableViewSection({_tableView: this}));
+									this._sections._add(this._createSeparator());
 									retval.push(this._currentSection);
 								}
-								this._currentSection.add(value[i]);
+								this._currentSection.add(value[i]); // We call the normal .add() method to hook into the sections proper add mechanism
 							} else if (value[i].declaredClass === "Ti.UI.TableViewSection") {
 								value[i]._tableView = this;
-								this._sections.add(this._currentSection = value[i]);
-								this._sections.add(this._createSeparator());
+								this._sections._add(this._currentSection = value[i]);
+								this._sections._add(this._createSeparator());
 								retval.push(this._currentSection);
 							}
+							this._publish(value[i]);
 						}
 						this._refreshSections();
 						
@@ -5309,7 +5725,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._footer._removeAllChildren();
-						this._footer.add(this._createDecorationLabel(value));
+						this._footer._add(this._createDecorationLabel(value));
 					}
 					return value;
 				}
@@ -5318,7 +5734,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._footer._removeAllChildren();
-						this._footer.add(value);
+						this._footer._add(value);
 					}
 					return value;
 				}
@@ -5327,8 +5743,8 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._header._removeAllChildren();
-						this._header.add(this._createDecorationLabel(value));
-						this._header.add(this._createSeparator());
+						this._header._add(this._createDecorationLabel(value));
+						this._header._add(this._createSeparator());
 					}
 					return value;
 				}
@@ -5337,28 +5753,126 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._header._removeAllChildren();
-						this._header.add(value);
+						this._header._add(value);
 					}
 					return value;
 				}
 			},
 			maxRowHeight: {
-				post: refreshSections
+				post: "_refreshSections"
 			},
 			minRowHeight: {
-				post: refreshSections
+				post: "_refreshSections"
 			},
 			rowHeight: {
-				post: refreshSections,
+				post: "_refreshSections",
 				value: "50px"
 			},
 			separatorColor: {
-				post: refreshSections,
+				post: "_refreshSections",
 				value: "lightGrey"
 			},
 			separatorStyle: {
-				post: refreshSections,
+				post: "_refreshSections",
 				value: TableViewSeparatorStyle.SINGLE_LINE
+			}
+		}
+
+	});
+
+});
+},
+"Ti/_/Layouts/Base":function(){
+/* /titanium/Ti/_/Layouts/Base.js */
+
+define(["Ti/_/css", "Ti/_/declare", "Ti/_/style", "Ti/_/lang", "Ti/API", "Ti/UI", "Ti/_", "Ti/_/dom"],
+	function(css, declare, style, lang, API, UI, _, dom) {
+
+	var isDef = lang.isDef,
+		val = lang.val;
+
+	return declare("Ti._.Layouts.Base", null, {
+		
+		computedSize: {width: 0, height: 0},
+
+		constructor: function(element) {
+			this.element = element;
+			css.add(element.domNode, css.clean(this.declaredClass));
+		},
+
+		destroy: function() {
+			css.remove(this.element.domNode, css.clean(this.declaredClass));
+		},
+		
+		handleInvalidState: function(child, parent) {
+			API.debug("WARNING: Attempting to layout element that has been destroyed.\n\t Removing the element from the parent.\n\t The parent has a widget ID of " + parent.widgetId + ".");
+			var children = parent._children;
+			children.splice(children.indexOf(child),1);
+		},
+		
+		getValueType: function(value) {
+			if (isDef(value)) {
+				if (value === UI.SIZE || value === UI.FILL) {
+					return value;
+				}
+				return ~(value + "").indexOf("%") ? "%" : "#";
+			}
+		},
+		
+		calculateAnimation: function(node, animation) {
+			var animationCoefficients = node._animationCoefficients,
+				center,
+				results,
+				pixelUnits = "px";
+				
+			(node.center || animation.center) && (center = {});
+			if (center) {
+				center.x = val(animation.center && animation.center.x, node.center && node.center.x);
+				center.y = val(animation.center && animation.center.y, node.center && node.center.y);
+			}
+			
+			!animationCoefficients && (animationCoefficients = node._animationCoefficients = {
+				width: {},
+				minWidth: {},
+				sandboxWidth: {},
+				height: {},
+				minHeight: {},
+				sandboxHeight: {},
+				left: {},
+				top: {}
+			});
+			
+			this._measureNode(node, {
+				left: val(animation.left,node.left),
+				right: val(animation.right,node.right),
+				top: val(animation.top,node.top),
+				bottom: val(animation.bottom,node.bottom),
+				center: center,
+				width: val(animation.width,node.width),
+				minWidth: node.minWidth,
+				minHeight: node.minHeight,
+				height: val(animation.height,node.height)
+			},animationCoefficients, this);
+			
+			results = this._doAnimationLayout(node, animationCoefficients);
+			
+			style.set(node.domNode, {
+				zIndex: node.zIndex | 0,
+				left: Math.round(results.left) + pixelUnits,
+				top: Math.round(results.top) + pixelUnits,
+				width: Math.round(results.width - node._borderLeftWidth - node._borderRightWidth) + pixelUnits,
+				height: Math.round(results.height - node._borderTopWidth - node._borderBottomWidth) + pixelUnits
+			});
+		},
+		
+		computeValue: function(dimension, valueType) {
+			var value = parseFloat(dimension);
+			switch (valueType) {
+				case "%": 
+					return value / 100;
+					
+				case "#": 
+					return dom.computeSize(dimension);
 			}
 		}
 
@@ -5386,15 +5900,28 @@ define(["Ti/_/declare", "Ti/_/UI/TextBox", "Ti/_/css", "Ti/_/dom", "Ti/_/lang", 
 					top: 0,
 					bottom: 0
 				}
-			}, this.domNode);
+			}, this._fieldWrapper = dom.create("span", {
+				style: {
+					position: "absolute",
+					left: 0,
+					right: 0,
+					top: 0,
+					bottom: 0
+				}
+			}, this.domNode));
 
 			this._initTextBox();
 			this._keyboardType();
 			this.borderStyle = UI.INPUT_BORDERSTYLE_BEZEL;
 
-			require.on(f, "focus", this, function() {
+			this._disconnectFocusEvent = require.on(f, "focus", this, function() {
 				this.clearOnEdit && (f.value = "");
 			});
+		},
+
+		destroy: function() {
+			this._disconnectFocusEvent();
+			TextBox.prototype.destroy.apply(this, arguments);
 		},
 
         _defaultWidth: UI.SIZE,
@@ -5501,7 +6028,7 @@ define(["Ti/_/declare", "Ti/_/UI/TextBox", "Ti/_/css", "Ti/_/dom", "Ti/_/lang", 
  * <http://dojotoolkit.org>
  */
 
-define(["Ti/_", "Ti/_/style"], function(_, style) {
+define(["Ti/_", "Ti/API", "Ti/_/style"], function(_, API, style) {
 	var is = require.is,
 		forcePropNames = {
 			innerHTML:	1,
@@ -5592,10 +6119,14 @@ define(["Ti/_", "Ti/_/style"], function(_, style) {
 			}
 		},
 
+		calculateDistance: function(ax, ay, bx, by) {
+			return Math.sqrt(Math.pow(ax - bx,2) + Math.pow(ay - by, 2));
+		},
+
 		unitize: function(x) {
 			return isNaN(x-0) || x-0 != x ? x : x + "px"; // note: must be != and not !==
 		},
-		
+
 		computeSize: function(x, totalLength, convertSizeToUndef) {
 			if (is(x,"Number") && isNaN(x)) {
 				return 0;
@@ -5607,22 +6138,31 @@ define(["Ti/_", "Ti/_/style"], function(_, style) {
 					convertSizeToUndef && (x = void 0);
 				} else {
 					var value = parseFloat(x),
-						units = x.substring(x.length - 2);
-					units.indexOf("%") !== -1 && (units = "%");
+						units = x.match(/.*(%|mm|cm|em|pt|in|px|dp)$/);
+					if (units) {
+						units = units[1];
+					} else {
+						units = "px";
+					}
 
 					switch(units) {
 						case "%":
 							if(totalLength == UI.SIZE) {
 								convertSizeToUndef ? void 0 : UI.SIZE;
 							} else if (!require.is(totalLength,"Number")) {
-								console.error("Could not compute percentage size/position of element.");
+								API.error("Could not compute percentage size/position of element.");
 								return;
 							} 
 							return value / 100 * totalLength;
 						case "mm":
-							value *= 10;
+							value /= 10;
 						case "cm":
-							return value * 0.0393700787 * _.dpi;
+							return value * 0.393700787 * _.dpi;
+						case "em":
+						case "pt":
+							value /= 12;
+						case "pc":
+							value /= 6;
 						case "in":
 							return value * _.dpi;
 						case "px":
@@ -5980,15 +6520,15 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "Ti/UI", "Ti/_
 					height: UI.SIZE,
 					bottom: 0,
 					backgroundColor: "white",
-					layout: "vertical",
+					layout: UI._LAYOUT_CONSTRAINING_VERTICAL,
 					opacity: 0
 				});
 
-			optionsWindow.add(dimmingView);
-			optionsWindow.add(optionsDialog);
+			optionsWindow._add(dimmingView);
+			optionsWindow._add(optionsDialog);
 
 			// Add the title
-			optionsDialog.add(UI.createLabel({
+			optionsDialog._add(UI.createLabel({
 				text: Locale._getString(this.titleid, this.title),
 				font: {fontWeight: "bold"},
 				left: 5,
@@ -6014,7 +6554,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "Ti/UI", "Ti/_
 				} else if (i === this.cancel) {
 					css.add(button.domNode, "TiUIElementGradientCancel");
 				}
-				optionsDialog.add(button);
+				optionsDialog._add(button);
 				button.addEventListener("singletap", lang.hitch(this, function(){
 					optionsWindow.close();
 					this._optionsWindow = void 0;
@@ -6027,21 +6567,23 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "Ti/UI", "Ti/_
 			}, this);
 
 			// Animate the background after waiting for the first layout to occur
-			optionsWindow.addEventListener("postlayout", function() {
-				optionsDialog.animate({
-					bottom: -optionsDialog._measuredHeight,
-					opacity: 1,
-					duration: 0
-				});
-				dimmingView.animate({
-					opacity: 0.5,
-					duration: 150
-				}, function(){
+			optionsDialog.addEventListener("postlayout", function() {
+				setTimeout(function(){ // We have to wait for the entire layout pass to complete and the CSS rules to be applied.
 					optionsDialog.animate({
-						bottom: 0,
-						duration: 150
+						bottom: -optionsDialog._measuredHeight,
+						opacity: 1,
+						duration: 0
 					});
-				});
+					dimmingView.animate({
+						opacity: 0.5,
+						duration: 200
+					}, function(){
+						optionsDialog.animate({
+							bottom: 0,
+							duration: 200
+						});
+					});
+				}, 0);
 			});
 
 			// Show the options dialog
@@ -6064,11 +6606,12 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "Ti/UI", "Ti/_
 "Ti/Locale":function(){
 /* /titanium/Ti/Locale.js */
 
-define(["require", "Ti/_/lang", "Ti/_/Evented"], function(require, lang, Evented) {
+define(["require", "Ti/_/lang", "Ti/_/Evented", "Ti/API"],
+	function(require, lang, Evented, API) {
 
 	var locale = lang.val(navigator.language,navigator.browserLanguage).replace(/^([^\-\_]+)[\-\_](.+)?$/, function(o, l, c){ return l.toLowerCase() + (c && "-" + c.toUpperCase()); }),
 		languageParts = locale.split("-"),
-		language = languageParts[0];
+		language = languageParts[0],
 		strings = {},
 		cfg = require.config,
 		app = cfg.app;
@@ -6087,25 +6630,25 @@ define(["require", "Ti/_/lang", "Ti/_/Evented"], function(require, lang, Evented
 
 	// format a date into a locale specific date format. Optionally pass a second argument (string) as either "short" (default), "medium" or "long" for controlling the date format.
 	String.formatDate = function(dt, fmt) {
-		console.debug('Method "String.formatDate" is not implemented yet.');
+		API.debug('Method "String.formatDate" is not implemented yet.');
 		return dt.toString();
 	};
 
 	// format a date into a locale specific time format.
 	String.formatTime = function(dt) {
-		console.debug('Method "String.formatTime" is not implemented yet.');
+		API.debug('Method "String.formatTime" is not implemented yet.');
 		return dt.toString();
 	};
 
 	// format a number into a locale specific currency format.
 	String.formatCurrency = function(amt) {
-		console.debug('Method "String.formatCurrency" is not implemented yet.');
+		API.debug('Method "String.formatCurrency" is not implemented yet.');
 		return amt;
 	};
 
 	// format a number into a locale specific decimal format.
 	String.formatDecimal = function(dec) {
-		console.debug('Method "String.formatDecimal" is not implemented yet.');
+		API.debug('Method "String.formatDecimal" is not implemented yet.');
 		return dec;
 	};
 
@@ -6149,20 +6692,24 @@ define(["require", "Ti/_/lang", "Ti/_/Evented"], function(require, lang, Evented
 "Ti/_/Gestures/TouchEnd":function(){
 /* /titanium/Ti/_/Gestures/TouchEnd.js */
 
-define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
+define(["Ti/_/declare", "Ti/_/lang", "Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
 
 	return declare("Ti._.Gestures.TouchEnd", GestureRecognizer, {
-		
+
 		name: "touchend",
-		
+
 		processTouchEndEvent: function(e, element){
 			if (!element._isGestureBlocked(this.name)) {
-				for (var i = 0; i < e.changedTouches.length; i++) {
-					lang.hitch(element,element._handleTouchEvent(this.name,{
-						x: e.changedTouches[i].clientX,
-						y: e.changedTouches[i].clientY,
-						source: this.getSourceNode(e,element)
-					}));
+				var changed = e.changedTouches,
+					i = 0,
+					l = changed.length,
+					src = this.getSourceNode(e, element);
+				for (; i < l; i++) {
+					element._handleTouchEvent(this.name, {
+						x: changed[i].clientX,
+						y: changed[i].clientY,
+						source: src
+					});
 				}
 			}
 		}
@@ -6208,15 +6755,21 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 					this._firstTapTime = null;
 					if (elapsedTime < this._timeThreshold && Math.abs(this._firstTapLocation.x - x) < this._driftThreshold && 
 							Math.abs(this._firstTapLocation.y - y) < this._driftThreshold) {
-						var result = {
-							x: x,
-							y: y,
-							source: this.getSourceNode(e,element)
-						};
+						var source = this.getSourceNode(e,element);
 						if (!element._isGestureBlocked(this.name)) {
 							this.blocking.push("singletap");
-							lang.hitch(element,element._handleTouchEvent("dblclick",result));
-							lang.hitch(element,element._handleTouchEvent(this.name,result));
+							// We don't reuse the same results object because the values are modified before the event is fired.
+							// If we reused the object, they would be modified twice, which is incorrect.
+							element._handleTouchEvent("dblclick", {
+								x: x,
+								y: y,
+								source: source
+							});
+							element._handleTouchEvent(this.name, {
+								x: x,
+								y: y,
+								source: source
+							});
 						}
 					} else {
 						this.initTracker(x,y);
@@ -6253,16 +6806,23 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 		constructor: function(args) {
 			this._indexedContent = [];
 
-			require.each(["_header", "_rows", "_footer"], lang.hitch(this, function(v) {
-				Widget.prototype.add.call(this, this[v] = UI.createView({ 
-					height: UI.SIZE, 
-					width: UI.INHERIT, 
-					layout: "vertical"
+			var i = 0,
+				l = 3,
+				a = ["_header", "_rows", "_footer"];
+
+			while (i < l) {
+				this._add(this[a[i++]] = UI.createView({
+					height: UI.SIZE,
+					width: UI.INHERIT,
+					layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 				}));
-			}));
+			}
 
 			// Create the parts out of Ti controls so we can make use of the layout system
-			this.layout = "vertical";
+			this.layout = UI._LAYOUT_CONSTRAINING_VERTICAL;
+
+			// Force single tap to be processed.
+			this.addEventListener("singletap");
 		},
 
 		_defaultWidth: UI.INHERIT,
@@ -6304,7 +6864,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 		_refreshRows: function() {
 			if (this._tableView) {
 				// Update the row information
-				var rows = this._rows.children,
+				var rows = this._rows._children,
 					tableView = this._tableView,
 					rowsData = this.constants.rows = [];
 				for (var i = 1; i < rows.length; i += 2) {
@@ -6342,7 +6902,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 		
 		add: function(value, index) {
 			
-			var rows = this._rows.children,
+			var rows = this._rows._children,
 				rowCount = this.rowCount;
 			if (!lang.isDef(index)) {
 				index = rowCount;
@@ -6352,7 +6912,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 			}
 			
 			if (rows.length === 0) {
-				this._rows.add(this._createSeparator());
+				this._rows._add(this._createSeparator());
 			}
 			
 			if (is(value,"Array")) {
@@ -6368,19 +6928,19 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 			if (index < 0 || index >= this.rowCount) {
 				return;
 			}
-			this._rows.children[2 * index + 1]._tableViewSection = null;
-			this._rows.remove(this._rows.children[2 * index + 1]); // Remove the separator
-			this._rows.remove(this._rows.children[2 * index + 1]); // Remove the row
+			this._rows._children[2 * index + 1]._tableViewSection = null;
+			this._rows.remove(this._rows._children[2 * index + 1]); // Remove the separator
+			this._rows.remove(this._rows._children[2 * index + 1]); // Remove the row
 			
 			// Remove the last separator, if there are no rows left
-			if (this._rows.children.length === 1) {
-				this._rows.remove(this._rows.children[0]);
+			if (this._rows._children.length === 1) {
+				this._rows.remove(this._rows._children[0]);
 			}
 			this._refreshRows();
 		},
 		
 		remove: function(view) {
-			var index = this._rows.children.indexOf(view);
+			var index = this._rows._children.indexOf(view);
 			if (index === -1) {
 				return;
 			}
@@ -6397,8 +6957,8 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._footer._removeAllChildren();
-						this._footer.add(this._createDecorationLabel(value));
-						this._footer.add(this._createSeparator());
+						this._footer._add(this._createDecorationLabel(value));
+						this._footer._add(this._createSeparator());
 					}
 					return value;
 				}
@@ -6407,7 +6967,7 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._footer._removeAllChildren();
-						this._footer.add(value);
+						this._footer._add(value);
 					}
 					return value;
 				}
@@ -6416,8 +6976,8 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._header._removeAllChildren();
-						this._header.add(this._createDecorationLabel(value));
-						this._header.add(this._createSeparator());
+						this._header._add(this._createDecorationLabel(value));
+						this._header._add(this._createSeparator());
 					}
 					return value;
 				}
@@ -6426,14 +6986,14 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/_/UI/Widget", "Ti/_/style","Ti/UI/Mobil
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._header._removeAllChildren();
-						this._header.add(value);
+						this._header._add(value);
 					}
 					return value;
 				}
 			},
 			
 			rowCount: function(value) {
-				return Math.floor(this._rows.children.length / 2);
+				return Math.floor(this._rows._children.length / 2);
 			}
 		}
 
@@ -6464,17 +7024,17 @@ define(["Ti/_/css", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "T
 					backgroundColor: "white",
 					borderRadius: 3,
 					height: UI.SIZE,
-					layout: "vertical",
+					layout: UI._LAYOUT_CONSTRAINING_VERTICAL,
 					opacity: 0,
 					width: "50%"
 				}),
 				buttons = this.buttonNames || [];
 
-			alertWindow.add(dimmingView);
-			alertWindow.add(alertDialog);
+			alertWindow._add(dimmingView);
+			alertWindow._add(alertDialog);
 
 			// Add the title
-			alertDialog.add(UI.createLabel({
+			alertDialog._add(UI.createLabel({
 				text: Locale._getString(this.titleid, this.title),
 				font: {fontWeight: "bold"},
 				left: 5,
@@ -6485,7 +7045,7 @@ define(["Ti/_/css", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "T
 			}));
 
 			// Add the message
-			alertDialog.add(UI.createLabel({
+			alertDialog._add(UI.createLabel({
 				text: Locale._getString(this.messageid, this.message),
 				left: 5,
 				right: 5,
@@ -6507,7 +7067,7 @@ define(["Ti/_/css", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "T
 					index: i
 				});
 				i === this.cancel && css.add(button.domNode, "TiUIElementGradientCancel");
-				alertDialog.add(button);
+				alertDialog._add(button);
 				button.addEventListener("singletap", lang.hitch(this, function(){
 					alertWindow.close();
 					this._alertWindow = void 0;
@@ -6519,16 +7079,18 @@ define(["Ti/_/css", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Locale", "T
 			}, this);
 
 			// Animate the background after waiting for the first layout to occur
-			alertWindow.addEventListener("postlayout", function() {
-				dimmingView.animate({
-					opacity: 0.5,
-					duration: 200
-				}, function(){
-					alertDialog.animate({
-						opacity: 1,
+			dimmingView.addEventListener("postlayout", function() {
+				setTimeout(function(){ // We have to wait for the entire layout pass to complete and the CSS rules to be applied.
+					dimmingView.animate({
+						opacity: 0.5,
 						duration: 200
-					});
-				});
+					}, function(){
+						alertDialog.animate({
+							opacity: 1,
+							duration: 200
+						});
+					});	
+				}, 0);
 			});
 
 			// Show the alert dialog
@@ -6562,28 +7124,29 @@ define(
 	["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/style", "Ti/_/lang", "Ti/_/UI/FontWidget", "Ti/UI"],
 	function(declare, dom, event, style, lang, FontWidget, UI) {
 		
-	var setStyle = style.set;
+	var on = require.on,
+		setStyle = style.set;
 
 	return declare("Ti._.UI.TextBox", FontWidget, {
-		
+
 		constructor: function(){
 			this._addEventModifier(["click", "singletap", "blur", "change", "focus", "return"], function(data) {
 				data.value = this.value;
 			});
 		},
 
-		_field: null,
-		
 		_preventDefaultTouchEvent: false,
 
 		_initTextBox: function() {
 			// wire up events
 			var field = this._field,
-				form = this._form = dom.create("form", null, this.domNode);
+				form = this._form = dom.create("form", null, this.domNode),
+				updateInterval = null,
+				previousText = "";
 
 			this._addStyleableDomNode(this._setFocusNode(field));
 
-			require.on(field, "keydown", this, function(e) {
+			on(field, "keydown", this, function(e) {
 				if (this.editable) {
 					if (e.keyCode === 13) {
 						if (this.suppressReturn) {
@@ -6596,29 +7159,26 @@ define(
 					event.stop(e);
 				}
 			});
-			require.on(field, "keypress", this, function() {
+
+			on(field, "keypress", this, function() {
 				this._capitalize();
 			});
-			
-			var updateInterval = null,
-				previousText = "";
-			require.on(field, "focus", this, function(){
-				updateInterval = setInterval(lang.hitch(this,function(){
-					var value = field.value,
-						newData = false;
-					if (previousText.length != value.length) {
-						newData = true;
-					} else if(previousText != value) {
-						newData = true;
-					}
-					if (newData) {
+
+			on(field, "focus", this, function(){
+				this.fireEvent("focus");
+
+				updateInterval = setInterval(lang.hitch(this, function(){
+					var value = field.value;
+					if (previousText.length !== value.length || previousText !== value) {
 						this.fireEvent("change");
 						previousText = value;
 					}
-				}),200);
+				}), 200);
 			});
-			require.on(field, "blur", this, function(){
+
+			on(field, "blur", this, function(){
 				clearInterval(updateInterval);
+				this.fireEvent("blur");
 			});
 		},
 
@@ -6637,16 +7197,14 @@ define(
 
 		blur: function() {
 			this._field.blur();
-			this.fireEvent("blur");
 		},
 
 		focus: function() {
 			this._field.focus();
-			this.fireEvent("focus");
 		},
 
 		hasText: function() {
-			return !this._field.value.length;
+			return !!this._field.value.length;
 		},
 
 		properties: {
@@ -6679,9 +7237,9 @@ define(
 						disp = "inherit";
 						~[4,8,10].indexOf(value) && (title = "Search");
 					}
-					setStyle(this._form,"display",disp);
+					setStyle(this._form, "display", disp);
 					this._field.title = title;
-					dom.place(this._field, dest);
+					dom.place(this._fieldWrapper, dest);
 					return value;
 				}
 			},
@@ -6800,11 +7358,6 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 		f && lang.generateAccessors(f, e[1], e[2]);
 	});
 
-	Object.defineProperty(Element.prototype, "text", { 
-		get: function() { return this.textContent; },
-		enumerable: true
-	});
-
 	return lang.setObject("Ti.XML", Evented, {
 		
 		parseString: function(xml) {
@@ -6908,20 +7461,24 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 "Ti/_/Gestures/TouchStart":function(){
 /* /titanium/Ti/_/Gestures/TouchStart.js */
 
-define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
+define(["Ti/_/declare", "Ti/_/lang", "Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
 
 	return declare("Ti._.Gestures.TouchStart", GestureRecognizer, {
-		
+
 		name: "touchstart",
-		
+
 		processTouchStartEvent: function(e, element){
 			if (!element._isGestureBlocked(this.name)) {
-				for (var i = 0; i < e.changedTouches.length; i++) {
-					lang.hitch(element,element._handleTouchEvent(this.name,{
-						x: e.changedTouches[i].clientX,
-						y: e.changedTouches[i].clientY,
-						source: this.getSourceNode(e,element)
-					}));
+				var changed = e.changedTouches,
+					i = 0,
+					l = changed.length,
+					src = this.getSourceNode(e, element);
+				for (; i < l; i++) {
+					element._handleTouchEvent(this.name, {
+						x: changed[i].clientX,
+						y: changed[i].clientY,
+						source: src
+					});
 				}
 			}
 		}
@@ -6933,7 +7490,7 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 "Ti/Blob":function(){
 /* /titanium/Ti/Blob.js */
 
-define(["Ti/_/declare", "Ti/_/Evented"], function(declare, Evented) {
+define(["Ti/_", "Ti/_/declare", "Ti/_/Evented"], function(_, declare, Evented) {
 
 	return declare("Ti.Blob", Evented, {
 
@@ -6947,7 +7504,7 @@ define(["Ti/_/declare", "Ti/_/Evented"], function(declare, Evented) {
 				img,
 				v = this.constants.__values__;
 
-			(this._isBinary = /^(application|image|audio|video)\//.test(type)) && (v.size = v.length);
+			(this._isBinary = _.isBinaryMimeType(type)) && (v.size = v.length);
 
 			if (!type.indexOf("image/")) {
 				img = new Image;
@@ -6972,7 +7529,7 @@ define(["Ti/_/declare", "Ti/_/Evented"], function(declare, Evented) {
 			height: 0,
 			length: 0,
 			mimeType: "",
-			nativePath: "",
+			nativePath: null,
 			size: 0,
 			text: function() {
 				return this._isBinary ? null : this._data || "";
@@ -6999,180 +7556,186 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/UI", "Ti/_/style",
 		constructor: function() {
 			var self = this,
 				clickEventName = "ontouchstart" in window ? "touchend" : "click",
-				upArrow = this._upArrow = dom.create("div", {
+				node = self.domNode,
+				rows = self.constants.__values__.rows = [],
+				upArrow = self._upArrow = dom.create("div", {
 					className: "TiUIElementGradient",
 					style: {
 						textAlign: "center",
 						position: "absolute",
-						top: "0px",
+						top: 0,
 						height: "40px",
-						width: "100%",
+						left: 0,
+						right: 0,
 						borderBottom: "1px solid #666",
 						fontSize: "28px",
 						cursor: "pointer"
 					},
 					innerHTML: "\u2227"
-				}, this.domNode);
-			on(upArrow, clickEventName, function(){
-				var nextRow = self._rows.indexOf(self.selectedRow);
-				if (nextRow > 0) {
-					self.selectedRow = self._rows[nextRow - 1];
-				} else {
-					self.selectedRow = self._rows[self._rows.length - 1];
-				}
-			});
-			
-			var titleContainer = this._titleContainer = dom.create("div", {
-				style: {
-					position: "absolute",
-					top: "50%",
-					height: "1em",
-					width: "100%",
-					marginTop: "-0.5em",
-					textAlign: "center"
-				}
-			}, this.domNode);
-			this._addStyleableDomNode(titleContainer);
-			
-			var titleClickArea = dom.create("div", {
-				style: {
-					position: "absolute",
-					top: "40px",
-					bottom: "40px",
-					width: "100%"
-				}
-			}, this.domNode);
-			on(titleClickArea, clickEventName, function() {
-				// Create the window and a background to dim the current view
-				var listWindow = UI.createWindow();
-				var dimmingView = UI.createView({
-					backgroundColor: "black",
-					opacity: 0,
-					left: 0,
-					top: 0,
-					right: 0,
-					bottom: 0
-				});
-				listWindow.add(dimmingView);
-				
-				// Create the list dialog itself
-				var listDialog = UI.createView({
-					width: "75%",
-					height: UI.SIZE,
-					backgroundColor: "white",
-					layout: "vertical",
-					borderRadius: 3,
-					opacity: 0
-				});
-				listWindow.add(listDialog);
-				
-				// Create the table rows
-				var rows = self._rows,
-					data = [],
-					selectedRowIndex = 0;
-				for(var i in rows) {
-					var row = rows[i],
-						isSelectedRow = row === self.selectedRow;
-					data.push({
-						title: row.title,
-						hasCheck: isSelectedRow
+				}, node),
+				titleContainer = self._titleContainer = dom.create("div", {
+					style: {
+						position: "absolute",
+						top: "50%",
+						height: "1em",
+						width: "100%",
+						marginTop: "-0.5em",
+						textAlign: "center"
+					}
+				}, node),
+				titleClickArea = dom.create("div", {
+					style: {
+						position: "absolute",
+						top: "40px",
+						bottom: "40px",
+						width: "100%"
+					}
+				}, node),
+				downArrow = self._downArrow = dom.create("div", {
+					className: "TiUIElementGradient",
+					innerHTML: "\u2228",
+					style: {
+						textAlign: "center",
+						position: "absolute",
+						bottom: "0px",
+						height: "40px",
+						width: "100%",
+						borderTop: "1px solid #666",
+						fontSize: "28px",
+						cursor: "pointer"
+					}
+				}, node);
+
+			self._addStyleableDomNode(titleContainer);
+
+			this._handles = [
+				on(upArrow, clickEventName, function() {
+					var nextRow = rows.indexOf(self.selectedRow);
+					if (nextRow > 0) {
+						self.selectedRow = rows[nextRow - 1];
+					} else {
+						self.selectedRow = rows[rows.length - 1];
+					}
+				}),
+				on(titleClickArea, clickEventName, function() {
+					// Create the window and a background to dim the current view
+					var listWindow = UI.createWindow(),
+						dimmingView = UI.createView({
+							backgroundColor: "#000",
+							opacity: 0,
+							left: 0,
+							top: 0,
+							right: 0,
+							bottom: 0
+						}),
+						listDialog = UI.createView({
+							width: "75%",
+							height: UI.SIZE,
+							backgroundColor: "#fff",
+							layout: UI._LAYOUT_CONSTRAINING_VERTICAL,
+							borderRadius: 3,
+							opacity: 0
+						}),
+						selectedRowIndex = 0,
+						tmp = 0,
+						data = rows.map(function(row) {
+							var isSelectedRow = row === self.selectedRow;
+							isSelectedRow && (selectedRowIndex = parseInt(tmp++));
+							return {
+								title: row.title,
+								hasCheck: isSelectedRow
+							};
+						}),
+						listTable = UI.createTableView({
+							left: 5,
+							right: 5,
+							top: 5,
+							height: data.length < 10 ? UI.SIZE : "70%",
+							data: data
+						}),
+						cancelButton = UI.createButton({
+							left: 5,
+							top: 5,
+							right: 5,
+							title: "Cancel"
+						});
+
+					listTable.addEventListener("singletap", function(e) {
+						e.index in rows && (self.selectedRow = rows[e.index]);
+						listWindow.close();
 					});
-					isSelectedRow && (selectedRowIndex = parseInt(i));
-				}
-				
-				// Add the table to the dialog
-				var listTable = UI.createTableView({
-					left: 5,
-					right: 5,
-					top: 5,
-					height: data.length < 10 ? UI.SIZE : "70%",
-					data: data
-				});
-				listDialog.add(listTable);
-				listTable.addEventListener("singletap", function(e) {
-					e.index in self._rows && (self.selectedRow = self._rows[e.index]);
-					listWindow.close();
-				});
-				
-				// Add a cancel button
-				var cancelButton = UI.createButton({
-					left: 5,
-					top: 5,
-					right: 5,
-					title: "Cancel"
-				});
-				listDialog.add(cancelButton);
-				cancelButton.addEventListener("singletap", function() {
-					listWindow.close();
-				});
-				
-				// Add a view to handle padding since there is no TI API to do it
-				listDialog.add(UI.createView({ height: "5px" }));
-				
-				// Show the options dialog
-				listWindow.open();
-				
-				// Animate the background after waiting for the first layout to occur
-				setTimeout(function(){
-					dimmingView.animate({
-						opacity: 0.5,
-						duration: 200
-					}, function(){
-						listDialog.animate({
-							opacity: 1,
+
+					cancelButton.addEventListener("singletap", function() {
+						listWindow.close();
+					});
+
+					listWindow._add(dimmingView);
+					listWindow._add(listDialog);
+
+					listDialog._add(listTable);
+					listDialog._add(cancelButton);
+
+					// Add a view to handle padding since there is no TI API to do it
+					listDialog._add(UI.createView({ height: "5px" }));
+
+					// Show the options dialog
+					listWindow.open();
+
+					// Animate the background after waiting for the first layout to occur
+					setTimeout(function() {
+						dimmingView.animate({
+							opacity: 0.5,
 							duration: 200
 						}, function() {
-							listTable.scrollToIndex(selectedRowIndex);
+							listDialog.animate({
+								opacity: 1,
+								duration: 200
+							}, function() {
+								listTable.scrollToIndex(selectedRowIndex);
+							});
 						});
-					});
-				},30);
-			});
-			
-			var downArrow = this._downArrow = dom.create("div", {
-				className: "TiUIElementGradient",
-				style: {
-					textAlign: "center",
-					position: "absolute",
-					bottom: "0px",
-					height: "40px",
-					width: "100%",
-					borderTop: "1px solid #666",
-					fontSize: "28px",
-						cursor: "pointer"
-				}
-			}, this.domNode);
-			downArrow.innerHTML = "\u2228";
-			on(downArrow, clickEventName, function() {
-				var nextRow = self._rows.indexOf(self.selectedRow);
-				if (nextRow < self._rows.length - 1) {
-					self.selectedRow = self._rows[nextRow + 1];
-				} else {
-					self.selectedRow = self._rows[0];
-				}
-			});
-			this._rows = [];
+					}, 30);
+				}),
+				on(downArrow, clickEventName, function() {
+					var nextRow = rows.indexOf(self.selectedRow);
+					if (nextRow < rows.length - 1) {
+						self.selectedRow = rows[nextRow + 1];
+					} else {
+						self.selectedRow = rows[0];
+					}
+				})
+			];
 		},
-		
+
+		destroy: function() {
+			event.off(this._handles);
+			FontWidget.prototype.destroy.apply(this, arguments);
+		},
+
 		_setCorners: function(left, right, radius) {
-			setStyle(this._upArrow, "borderTopLeftRadius", left ? radius : "0px");
-			setStyle(this._downArrow, "borderBottomLeftRadius", left ? radius : "0px");
-			setStyle(this._upArrow, "borderTopRightRadius", right ? radius : "0px");
-			setStyle(this._downArrow, "borderBottomRightRadius", right ? radius : "0px");
-			setStyle(this.domNode,"borderRight", right ? "" : "1px solid #666");
+			setStyle(this._upArrow, {
+				borderTopLeftRadius: left ? radius : "0px",
+				borderTopRightRadius: right ? radius : "0px"
+			});
+			setStyle(this._downArrow, {
+				borderBottomLeftRadius: left ? radius : "0px",
+				borderBottomRightRadius: right ? radius : "0px"
+			});
+			this.borderWidth = [0, right ? 0 : 1, 0, 0];
+			this.borderColor = "#666";
 		},
 
 		_defaultWidth: UI.SIZE,
 
 		_defaultHeight: UI.SIZE,
-		
-		_doLayout: function() {
+
+		_preLayout: function() {
 			this._updateContentWidth();
 			this._parentPicker && this._parentPicker._updateColumnHeights();
-			
-			return FontWidget.prototype._doLayout.apply(this,arguments);
+			return true;
 		},
-		
-		_getContentSize: function(width, height) {
+
+		_getContentSize: function() {
 			var titleContainer = this._titleContainer;
 				text = titleContainer.innerHTML;
 			return {
@@ -7180,85 +7743,79 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/UI", "Ti/_/style",
 				height: this._tallestRowHeight + contentPadding + this._upArrow.clientHeight + this._downArrow.clientHeight
 			};
 		},
-		
+
 		_widestRowWidth: 0,
-		
+
 		_tallestRowHeight: 0,
-		
+
 		_updateContentWidth: function() {
-			if (this._hasSizeDimensions()) {
-				var widestRowWidth = 0;
-				for(var i in this._rows) {
-					var row = this._rows[i];
-					widestRowWidth = Math.max(widestRowWidth, row._measureText(row.title, row.domNode).width);
-				}
-				if (this._widestRowWidth !== widestRowWidth) {
-					this._widestRowWidth = widestRowWidth;
-					this._triggerLayout();
-				}
+			var widestRowWidth = 0,
+				i = 0,
+				len = this.rows.length,
+				row;
+			while (i < len) {
+				row = this.rows[i++];
+				widestRowWidth = Math.max(widestRowWidth, row._measureText(row.title, row.domNode).width);
+			}
+			if (this._widestRowWidth !== widestRowWidth) {
+				this._widestRowWidth = widestRowWidth;
 			}
 		},
-		
+
 		_getTallestRowHeight: function() {
-			if (this._hasSizeDimensions()) {
-				var widestRowWidth = 0,
-					tallestRowHeight = 0;
-				for(var i in this._rows) {
-					var row = this._rows[i];
-					tallestRowHeight = Math.max(tallestRowHeight, row._measureText(row.title, row.domNode).height);
-				}
-				return tallestRowHeight;
+			var widestRowWidth = 0,
+				tallestRowHeight = 0,
+				i = 0,
+				len = this.rows.length;
+			for(; i < len; i++) {
+				var row = this.rows[i];
+				tallestRowHeight = Math.max(tallestRowHeight, row._measureText(row.title, row.domNode).height);
 			}
+			return tallestRowHeight;
 		},
-		
+
 		_setTallestRowHeight: function(height) {
 			if (this._tallestRowHeight !== height) {
 				this._tallestRowHeight = height;
 				this._triggerLayout();
 			}
 		},
-		
+
 		addRow: function(row) {
-			this._rows.push(row);
+			this.rows.push(row);
 			row._parentColumn = this;
 			this._updateContentWidth();
 			this._parentPicker && this._parentPicker._updateColumnHeights();
 			if (!this.selectedRow) {
 				this.selectedRow = row;
 			}
+			this._publish(row);
 		},
-		
+
 		removeRow: function(row) {
-			var rowIndex = this._rows.indexOf(row);
+			var rowIndex = this.rows.indexOf(row);
 			if (rowIndex !== -1) {
-				this._rows.splice(rowIndex,1);
+				this.rows.splice(rowIndex, 1);
 				row._parentColumn = void 0;
 				this._updateContentWidth();
 				this._parentPicker && this._parentPicker._updateColumnHeights();
 				if (this.selectedRow === row) {
-					this.selectedRow = this._rows[0];
+					this.selectedRow = this.rows[0];
 				}
 			}
+			this._unpublish(row);
 		},
-		
+
 		constants: {
-			
 			rowCount: {
 				get: function() {
-					return this._rows.length;
+					return this.rows.length;
 				}
 			},
-			
-			rows: {
-				get: function() {
-					return this._rows;
-				}
-			}
-			
+			rows: void 0
 		},
-		
+
 		properties: {
-			
 			selectedRow: {
 				set: function(value) {
 					if (!value) {
@@ -7267,7 +7824,7 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/UI", "Ti/_/style",
 						this._titleContainer.innerHTML = "";
 						this._hasSizeDimensions() && this._triggerLayout();
 					} else {
-						var rowIndex = this._rows.indexOf(value);
+						var rowIndex = this.rows.indexOf(value);
 						if (rowIndex === -1) {
 							return;
 						}
@@ -7281,17 +7838,16 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/UI", "Ti/_/style",
 				post: function(value) {
 					this.fireEvent("change", {
 						column: this,
-						rowIndex: this._rows.indexOf(value),
+						rowIndex: this.rows.indexOf(value),
 						row: value,
 						value: value && value.title
 					});
 				}
 			}
-			
 		}
-	
+
 	});
-	
+
 });
 },
 "url:Ti/_/UI/WebViewBridge.js":"var a, b,\n\
@@ -7299,10 +7855,10 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/UI", "Ti/_/style",
 	p = w.parent,\n\
 	u = w.onunload;\n\
 \n\
-if(p && p.Ti){\n\
+if (!Ti && !Titanium && p && p.Ti) {\n\
 	a = p.Ti.API;\n\
 	b = p.Ti.App;\n\
-	Ti = {\n\
+	Ti = Titanium = {\n\
 		API: {\n\
 			log: a.log,\n\
 			debug: a.debug,\n\
@@ -7325,27 +7881,29 @@ w.onunload = function() {\n\
 "Ti/UI/Picker":function(){
 /* /titanium/Ti/UI/Picker.js */
 
-define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "Ti/_/dom", "Ti/_/ready"],
-	function(declare, View, Widget, UI, lang, dom, ready) {
-		
+define(["Ti/_/declare", "Ti/_/event", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "Ti/_/dom", "Ti/_/ready"],
+	function(declare, event, View, Widget, UI, lang, dom, ready) {
+
 	var is = require.is,
 		borderRadius = 6,
 		unitizedBorderRadius = dom.unitize(borderRadius),
 		inputSizes = {},
+		on = require.on,
 		DateTimeInput = declare(Widget, {
-			
+
 			constructor: function() {
 				var input = this._input = dom.create("input", {
-					style: {
-						left: unitizedBorderRadius,
-						top: unitizedBorderRadius,
-						right: unitizedBorderRadius,
-						bottom: unitizedBorderRadius,
-						position: "absolute"
-					}
-				}, this.domNode);
-				var currentValue = this._input.value,
+						style: {
+							left: unitizedBorderRadius,
+							top: unitizedBorderRadius,
+							right: unitizedBorderRadius,
+							bottom: unitizedBorderRadius,
+							position: "absolute"
+						}
+					}, this.domNode),
+					currentValue,
 					self = this;
+
 				function handleChange() {
 					if (currentValue !== input.value) {
 						currentValue = input.value;
@@ -7354,42 +7912,37 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 						});
 					}
 				}
-				on(this._input, "ontouchstart" in window ? "touchend" : "click", function() {
-					handleChange();
-				});
-				on(this._input, "keyup", function() {
-					handleChange();
-				});
+
+				self._handles = [
+					on(input, "ontouchstart" in window ? "touchend" : "click", handleChange),
+					on(input, "keyup", handleChange)
+				];
 			},
-			
-			_doLayout: function(params) {
-				var values = this.properties.__values__;
-				values.width = params.isParentSize.width ? UI.SIZE : "100%";
-				values.height = params.isParentSize.height ? UI.SIZE : "100%";
-				
-				return Widget.prototype._doLayout.call(this,params);
+
+			destroy: function() {
+				event.off(this._handles);
+				Widget.prototype.destroy.apply(this, arguments);
 			},
-		
-			_getContentSize: function(width, height) {
+
+			_getContentSize: function() {
 				return inputSizes[this.type];
 			},
-			
+
 			properties: {
 				type: {
 					set: function(value) {
-						this._input.type = value;
-						return value;
+						return this._input.type = value;
 					}
 				},
 				min: {
 					set: function(value) {
-						this._input.min = lang.val(value,"");
+						this._input.min = lang.val(value, "");
 						return value;
 					}
 				},
 				max: {
 					set: function(value) {
-						this._input.max = lang.val(value,"");
+						this._input.max = lang.val(value, "");
 						return value;
 					}
 				},
@@ -7403,15 +7956,15 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 				}
 			}
 		});
-	
+
 	ready(function() {
 		var inputRuler = dom.create("input", {
-			style: {
-				height: "auto",
-				width: "auto"
-			}
-		}, document.body);
-		
+				style: {
+					height: UI.SIZE,
+					width: UI.SIZE
+				}
+			}, document.body);
+
 		["Date", "Time", "DateTime"].forEach(function(type) {
 			try {
 				inputRuler.type = type;
@@ -7421,33 +7974,37 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 				height: inputRuler.clientHeight + 2 * borderRadius
 			};
 		});
-		
+
 		dom.detach(inputRuler);
 	});
 
 	return declare("Ti.UI.Picker", View, {
-		
+
 		constructor: function() {
-			this.layout = "horizontal";
-			this._layout._defaultVerticalAlignment = "center";
+			this.layout = "constrainingHorizontal";
 			this._columns = [];
+			this._getBorderFromCSS();
 		},
-		
+
 		_currentColumn: null,
-		
+
 		_addColumn: function(column) {
 			this._columns.push(column);
 			column._parentPicker = this;
-			var numColumns = this._columns.length,
+
+			var i = 0,
+				numColumns = this._columns.length,
 				width = this.width === UI.SIZE ? UI.SIZE : 100 / numColumns + "%",
 				height = this.height === UI.SIZE ? UI.SIZE : "100%";
-			for (var i = 0; i < numColumns; i++) {
-				var column = this._columns[i];
+
+			for (; i < numColumns; i++) {
+				column = this._columns[i]; // Repurposing of the column variable
 				column.width = width;
 				column.height = height;
 				column._setCorners(i === 0, i === numColumns - 1, unitizedBorderRadius);
 			}
-			column._pickerChangeEventListener = lang.hitch(this,function(e) {
+
+			column._pickerChangeEventListener = lang.hitch(this, function(e) {
 				var eventInfo = {
 					column: e.column,
 					columnIndex: this._columns.indexOf(e.column),
@@ -7466,8 +8023,10 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 				}
 				this.fireEvent("change", eventInfo);
 			});
+
 			column.addEventListener("change", column._pickerChangeEventListener);
-			View.prototype.add.call(this,column);
+			this._add(column);
+			this._publish(column);
 		},
 		
 		_updateColumnHeights: function() {
@@ -7499,7 +8058,12 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 				}
 			}
 		},
-		
+
+		destroy: function() {
+			this._dateTimeInput && this._dateTimeInput.destroy();
+			Widget.prototype.destroy.apply(this, arguments);
+		},
+
 		getSelectedRow: function(columnIndex) {
 			var column = this._columns[columnIndex];
 			return column && column.selectedRow;
@@ -7512,11 +8076,10 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 		
 		properties: {
 			columns: {
-				get: function(value) {
+				get: function() {
 					return this._columns;
 				},
 				set: function(value) {
-					
 					// Remove the existing columns
 					this._removeAllChildren();
 					for(var i in this._columns) {
@@ -7525,37 +8088,40 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 						column._parentPicker = void 0;
 					}
 					this._columns = [];
-					
+
 					// Add the new column(s)
 					value && this.add(value);
-					
+
 					// We intentionally don't return anything because we are not using the internal storage mechanism.
 				}
 			},
-			
+
 			maxDate: {
 				set: function(value) {
 					this._dateTimeInput && (this._dateTimeInput.max = value);
 					return value;
 				}
 			},
-			
+
 			minDate: {
 				set: function(value) {
 					this._dateTimeInput && (this._dateTimeInput.min = value);
 					return value;
 				}
 			},
-			
+
 			type: {
 				set: function(value, oldValue) {
+					var self = this;
 					if (value !== oldValue) {
 						this.columns = void 0;
 						this._dateTimeInput = null;
-						var self = this;
+
 						function createInput(inputType) {
 							var dateTimeInput = self._dateTimeInput = new DateTimeInput({
-								type: inputType
+								type: inputType,
+								width: UI.INHERIT,
+								height: UI.INHERIT
 							});
 							dateTimeInput.addEventListener("change", function(e) {
 								self.properties.__values__.value = e.value;
@@ -7563,8 +8129,9 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 							});
 							dateTimeInput.min = self.min;
 							dateTimeInput.max = self.max;
-							View.prototype.add.call(self,dateTimeInput);
+							self._add(dateTimeInput);
 						}
+
 						switch(value) {
 							case UI.PICKER_TYPE_DATE:
 								createInput("Date");
@@ -7581,18 +8148,17 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
 				},
 				value: UI.PICKER_TYPE_PLAIN
 			},
-			
+
 			value: {
 				set: function(value) {
-					this._dateTimeInput.value = value;
+					this._dateTimeInput && (this._dateTimeInput.value = value);
 					return value;
 				}
 			}
-			
 		}
-	
+
 	});
-	
+
 });
 },
 "Ti/_/string":function(){
@@ -7607,12 +8173,12 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/UI/Widget", "Ti/UI", "Ti/_/lang", "T
  * <http://dojotoolkit.org>
  */
 
-define(["Ti/_", "Ti/_/lang"], function(_, lang) {
+define(["Ti/_", "Ti/_/has", "Ti/_/lang"], function(_, has, lang) {
 
 	var assert = _.assert,
-		has = require.has,
 		is = require.is,
 		mix = require.mix,
+		isOpera = has("opera"),
 		zeros10 = "0000000000",
 		spaces10 = "          ",
 		specifiers = {
@@ -7787,7 +8353,7 @@ define(["Ti/_", "Ti/_/lang"], function(_, lang) {
 
 		// Ensure a '0' before the period.
 		// Opera implements (0.001).toString() as '0.001', but (0.001).toFixed(1) is '.001'
-		has("opera") && (token.arg = token.arg.replace(/^\./, '0.'));
+		isOpera && (token.arg = token.arg.replace(/^\./, '0.'));
 
 		// if alt, ensure a decimal point
 		if (token.alternative) {
@@ -7817,7 +8383,7 @@ define(["Ti/_", "Ti/_/lang"], function(_, lang) {
 		while (match = re.exec(format)) {
 			content = format.slice(lastIndex, re.lastIndex - match[0].length);
 			content.length && tokens.push(content);
-			if (has("opera")) {
+			if (isOpera) {
 				copy = match.slice(0);
 				while (copy.length < match.length) {
 					copy.push(null);
@@ -7839,7 +8405,7 @@ define(["Ti/_", "Ti/_/lang"], function(_, lang) {
 		args.shift();
 		assert(!mapped || args.length, "Format has no mapped arguments");
 
-		require.each(tokens, function(token) {
+		tokens.forEach(function(token) {
 			var tf,
 				flags = {},
 				fi,
@@ -8127,7 +8693,6 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 		
 		constants: {
 			
-			forceDialogAuth: true,
 			
 			BUTTON_STYLE_NORMAL: 1,
 			
@@ -8147,6 +8712,8 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 			},
 			
 			expirationDate: void 0,
+			
+			forceDialogAuth: true,
 			
 			loggedIn: false,
 			
@@ -8194,106 +8761,205 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/_/Filesystem/Local", "Ti/App/Propert
 "Ti/UI/MobileWeb/NavigationGroup":function(){
 /* /titanium/Ti/UI/MobileWeb/NavigationGroup.js */
 
-define(["Ti/_/declare", "Ti/UI/View", "Ti/UI", "Ti/_/style", "Ti/_/lang"],
-	function(declare, View, UI, style, lang) {
+define(["Ti/_/css", "Ti/_/declare", "Ti/UI/View", "Ti/UI", "Ti/_/lang"],
+	function(css, declare, View, UI, lang) {
 		
-	var isDef = lang.isDef;
+	var isDef = lang.isDef,
+		UI_FILL = UI.FILL,
+		navGroupCss = "TiUINavigationGroup";
 
 	return declare("Ti.UI.MobileWeb.NavigationGroup", View, {
 
 		constructor: function(args) {
-			var self = this;
-			self._windows = [];
+			var self = this,
+				win = self.constants.window = args && args.window,
+				tab = args && args._tab,
+				navBarContainer = self._navBarContainer = UI.createView({
+					height: 50,
+					width: UI.FILL,
+					layout: UI._LAYOUT_CONSTRAINING_HORIZONTAL
+				});
+			css.add(navBarContainer.domNode, navGroupCss);
+			self.layout = UI._LAYOUT_CONSTRAINING_VERTICAL;
 			
-			// Process the creation time args
-			if (!args.window) {
-				throw new Error("A window must be specified at creation time in Ti.UI.MobileWeb.NavigationGroup.");
-			}
-			var rootWindow = self.constants.window = args && args.window;
-			
-			// Create the nav controls
-			self.layout = "vertical";
-			self._navBarContainer = UI.createView({
-				width: UI.FILL,
-				height: 50,
-				backgroundColor: "#888"
-			});
-			self._navBarContainer.add(self._backButton = UI.createButton({
-				title: "Back",
+			// Create the nav bar content
+			navBarContainer.add(self._leftContainer = Ti.UI.createView({
+				width: UI.SIZE,
+				height: "100%",
 				left: 5,
-				opacity: 0,
-				enabled: true
+				right: 5
 			}));
-			self._backButton.addEventListener("singletap", function(){
-				self.close();
-			});
-			self._navBarContainer.add(self._title = UI.createLabel({
-				text: rootWindow._getTitle(),
+			navBarContainer.add(self._centerContainer = Ti.UI.createView({
 				width: UI.FILL,
-				textAlign: UI.TEXT_ALIGNMENT_CENTER,
-				touchEnabled: false
+				height: "100%"
 			}));
-			
+			navBarContainer.add(self._rightContainer = Ti.UI.createView({
+				width: UI.SIZE,
+				height: "100%",
+				left: 5,
+				right: 5
+			}));
+			self._add(navBarContainer);
+
 			// Create the content container
-			self._contentContainer = UI.createView({
-				width: UI.FILL,
-				height: UI.FILL
-			});
-			self._contentContainer.add(rootWindow);
+			self._add(self._contentContainer = UI.createView({
+				width: UI_FILL,
+				height: UI_FILL
+			}));
 			
-			self.navBarAtTop = true;
+			// Stylize the top
+			this.navBarAtTop = true;
+			navBarContainer._getBorderFromCSS();
+			
+			// Initialize the window stack and add the root window
+			self._windows = [];
+			win && self.open(win);
 		},
 
-		_defaultWidth: UI.FILL,
+		_defaultWidth: UI_FILL,
+
+		_defaultHeight: UI_FILL,
 		
-		_defaultHeight: UI.FILL,
+		_updateNavBar: function() {
+			var _self = this,
+				windows = _self._windows,
+				len = windows.length,
+				activeWin = windows[len - 1],
+				navBarContainer = this._navBarContainer,
+				leftContainer = _self._leftContainer,
+				centerContainer = _self._centerContainer,
+				rightContainer = _self._rightContainer,
+				leftView,
+				centerView,
+				rightView = activeWin.rightNavButton;
+			
+			if (activeWin.leftNavButton) {
+				leftView = activeWin.leftNavButton;
+			} else {
+				if (!_self._backButton) {
+					_self._backButton = Ti.UI.createButton({
+						title: "Back"
+					});
+					require.on(_self._backButton, "singletap", function() {
+						// Note: we can reuse activeWin or length because they may have changed by the time this event 
+						// listener is called due to reuse of the back button across windows.
+						_self.close(windows[windows.length - 1]);
+					});
+				};
+				len > 1 && (leftView = _self._backButton);
+			}
+			if (leftContainer._children[0] !== leftView) {
+				leftContainer._removeAllChildren();
+				leftView && leftContainer._add(leftView);
+			}
+			
+			if (rightContainer._children[0] !== rightView) {
+				rightContainer._removeAllChildren();
+				rightView && rightContainer._add(rightView);
+			}
+			
+			navBarContainer.backgroundColor = activeWin.barColor;
+			navBarContainer.backgroundImage = activeWin.barImage;
+			navBarContainer.opacity = activeWin.translucent ? 0.5 : 1;
+			navBarContainer.height = activeWin.navBarHidden && activeWin.modal ? 0 : 50;
+			
+			if (activeWin.titleControl) {
+				centerView = activeWin.titleControl;
+			} else if (activeWin.titleImage) {
+				centerView = activeWin._titleImageView || (activeWin._titleImageView = Ti.UI.createImageView({
+					image: activeWin.titleImage
+				}));
+			} else {
+				centerView = activeWin._titleControl || (activeWin._titleControl = Ti.UI.createLabel({
+					text: activeWin._getTitle() || (this._tab && this._tab._getTitle()) || "",
+					width: "100%",
+					height: "100%",
+					textAlign: UI.TEXT_ALIGNMENT_CENTER
+				}));
+			}
+			if (centerContainer._children[0] !== centerView) {
+				centerContainer._removeAllChildren();
+				centerView && centerContainer._add(centerView);
+			}
+		},
 
-		open: function(win, options) {
-			// Show the back button, if need be
-			var backButton = this._backButton;
+		_getTopWindow: function() {
+			var windows = this._windows,
+				len = windows.length;
+			return len ? windows[windows.length - 1] : null;
+		},
 
-			backButton.opacity || backButton.animate({opacity: 1, duration: 250}, function() {
-				backButton.opacity = 1;
-				backButton.enabled = true;
+		open: function(win) {
+			if (!win._opened) {
+				var backButton = this._backButton,
+					windows = this._windows,
+					tab = this._tab;
+				
+				win._navGroup = this;
+
+				// Set a default background
+				!isDef(win.backgroundColor) && !isDef(win.backgroundImage) && (win.backgroundColor = "#fff");
+
+				~(windows.length - 1) && windows[windows.length - 1].fireEvent("blur");
+
+				// Show the window
+				tab && (win.tabGroup = (win.tab = tab)._tabGroup);
+				windows.push(win);
+				this._contentContainer._add(win);
+				this._updateNavBar();
+				
+				win._opened || win.fireEvent("open");
+				win._opened = 1;
+				win.fireEvent("focus");
+			}
+		},
+
+		close: function(win) {
+			var windows = this._windows,
+				windowIdx = windows.indexOf(win),
+				self = this,
+				backButton = self._backButton;
+				
+			win._navGroup = void 0;
+
+			// make sure the window exists and it's not the root
+			if (windowIdx > 0) {
+				windows.splice(windowIdx, 1);
+				win.fireEvent("blur");
+				self._contentContainer.remove(win);
+				win.fireEvent("close");
+				win._opened = 0;
+
+				this._updateNavBar();
+				windows[windows.length - 1].fireEvent("focus");
+			}
+		},
+
+		_reset: function() {
+			var windows = this._windows,
+				win,
+				i = windows.length - 1,
+				l = i;
+
+			this._backButton.animate({opacity: 0, duration: 250}, function() {
+				this.opacity = 0;
+				this.enabled = false;
 			});
 
-			// Set a default background
-			!isDef(win.backgroundColor) && !isDef(win.backgroundImage) && (win.backgroundColor = "#fff");
-
-			// Show the window
-			this._windows.push(win);
-			this._contentContainer.add(win);
-			this._title.text = win._getTitle();
-		},
-		
-		close: function(win, options) {
-			var windows = this._windows,
-				topWindowIdx = windows.length - 1,
-				win = win || windows[topWindowIdx],
-				windowLocation = windows.indexOf(win),
-				backButton = this._backButton,
-				nextWindow = this.window;
-
-			if (!~windowLocation) {
-				return;
-			}
-
-			// If the window is on top, we have to go to the previous window
-			if (windows[topWindowIdx] === win) {
-				if (topWindowIdx > 0) {
-					nextWindow = windows[topWindowIdx - 1];
-				} else {
-					backButton.animate({opacity: 0, duration: 250}, function() {
-						backButton.opacity = 0;
-						backButton.enabled = false;
-					});
+			while (1) {
+				win = windows[i];
+				if (!i) {
+					break;
 				}
-				this._title.text = nextWindow._getTitle();
+				i-- === l && win.fireEvent("blur");
+				this._contentContainer.remove(win);
+				win.fireEvent("close");
+				win._opened = 0;
 			}
 
-			// Remove the window
-			windows.splice(windowLocation, 1);
-			this._contentContainer.remove(win);
+			windows.splice(1);
+			this._updateNavBar();
+			win.fireEvent("focus");
 		},
 
 		constants: {
@@ -8304,24 +8970,16 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/UI", "Ti/_/style", "Ti/_/lang"],
 			navBarAtTop: {
 				set: function (value, oldValue) {
 					if (value !== oldValue) {
-						
 						var navBarContainer = this._navBarContainer,
-							contentContainer = this._contentContainer;
-						this.remove(navBarContainer);
-						this.remove(contentContainer);
+							navBarContainerDomNode = navBarContainer.domNode;
+							
+						this._remove(navBarContainer);
+						this._insertAt(navBarContainer, value ? 0 : 1);
 						
-						var borderLocation;
-						if (value) {
-							this.add(navBarContainer);
-							this.add(contentContainer);
-							borderLocation = "borderBottom"
-						} else {
-							this.add(contentContainer);
-							this.add(navBarContainer);
-							borderLocation = "borderTop"
-						}
-						style.set(navBarContainer.domNode,borderLocation,"1px solid #555");
+						css.remove(navBarContainerDomNode, navGroupCss + (value ? "Top" : "Bottom"));
+						css.add(navBarContainerDomNode, navGroupCss + (value ? "Bottom" : "Top"));
 					}
+
 					return value;
 				}
 			}
@@ -8340,9 +8998,10 @@ define(["Ti/_/declare", "Ti/_/UI/TextBox", "Ti/_/dom", "Ti/_/css", "Ti/_/style",
 	return declare("Ti.UI.TextArea", TextBox, {
 
 		constructor: function(args) {
-			this._field = dom.create("textarea", {
+			this._field = this._fieldWrapper = dom.create("textarea", {
 				autocomplete: "off",
 				style: {
+					backgroundColor: "transparent",
 					position: "absolute",
 					left: 0,
 					right: 0,
@@ -8390,8 +9049,11 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/UI/FontWidget", "Ti/_/lang", "Ti
 					className: "TiUIProgressBarContainer",
 					style: {
 						pointerEvents: "none",
-						width: "100%",
-						height: "100%",
+						left: 0,
+						right: 0,
+						top: 0,
+						bottom: 0,
+						position: "absolute",
 						overflow: "hidden"
 					}
 				}, this.domNode);
@@ -8403,14 +9065,6 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/UI/FontWidget", "Ti/_/lang", "Ti
 						height: "100%"
 					}
 				}, this._contentContainer);
-			},
-			
-			_doLayout: function(params) {
-				var values = this.properties.__values__;
-				values.width = params.isParentSize.width ? UI.SIZE : "100%";
-				values.height = params.isParentSize.height ? UI.SIZE : "100%";
-				
-				return Widget.prototype._doLayout.call(this,params);
 			},
 			
 			_getContentSize: function(width, height) {
@@ -8428,32 +9082,19 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/UI/FontWidget", "Ti/_/lang", "Ti
 	return declare("Ti.UI.ProgressBar", Widget, {
 		
 		constructor: function() {
-			this.add(this._contentContainer = UI.createView({
-				width: UI.SIZE,
-				height: UI.SIZE,
+			this._add(this._contentContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.INHERIT,
 				left: 0,
 				top: 0,
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			this._contentContainer._layout._defaultHorizontalLayout = "left";
-			this._contentContainer.add(this._message = UI.createLabel());
-			this._contentContainer.add(this._progressBar = new InternalProgressBar());
-		},
-			
-		_doLayout: function() {
-			var props = this._contentContainer.properties.__values__;
-			props.width = this.width === UI.SIZE || !lang.isDef(this.width) ? UI.SIZE : "100%";
-			props.height = this.height === UI.SIZE || !lang.isDef(this.height) ? UI.SIZE : "100%";
-			
-			if (this._message._getContentSize().width === 0) {
-				this._message.properties.__values__.height = 0;
-				this._progressBar.properties.__values__.top = 0;
-			} else {
-				this._message.properties.__values__.height = UI.SIZE;
-				this._progressBar.properties.__values__.top = 2;
-			}
-			
-			return Widget.prototype._doLayout.apply(this,arguments);
+			this._contentContainer._layout._defaultHorizontalLayout = "start";
+			this._contentContainer._add(this._message = UI.createLabel());
+			this._contentContainer._add(this._progressBar = new InternalProgressBar({
+				width: UI.INHERIT,
+				height: UI.INHERIT
+			}));
 		},
 		
 		_updateSize: function() {
@@ -8488,42 +9129,25 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/UI/FontWidget", "Ti/_/lang", "Ti
 			
 			min: {
 				set: function(value) {
-					if (value > this.max) {
-						value = this.max;
-					}
-					return value;
+					return Math.min(value, this.max);
 				},
-				post: function() {
-					this._updateSize();
-				},
+				post: "_updateSize",
 				value: 0
 			},
 			
 			max: {
 				set: function(value) {
-					if (value < this.min) {
-						value = this.min;
-					}
-					return value;
+					return Math.max(value, this.min);
 				},
-				post: function() {
-					this._updateSize();
-				},
+				post: "_updateSize",
 				value: 100
 			},
 			
 			value: {
 				set: function(value) {
-					if (value < this.min) {
-						value = this.min;
-					} else if (value > this.max) {
-						value = this.max;
-					}
-					return value;
+					return Math.min(Math.max(value, this.min), this.max);
 				},
-				post: function() {
-					this._updateSize();
-				},
+				post: "_updateSize",
 				value: 0
 			}
 		}
@@ -8534,167 +9158,146 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/UI/FontWidget", "Ti/_/lang", "Ti
 "Ti/UI/ScrollView":function(){
 /* /titanium/Ti/UI/ScrollView.js */
 
-define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang", "Ti/UI"],
-	function(declare, View, style, lang, UI) {
+define(["Ti/_/declare", "Ti/_/UI/KineticScrollView", "Ti/_/style", "Ti/_/lang", "Ti/UI"],
+	function(declare, KineticScrollView, style, lang, UI) {
 
-	return declare("Ti.UI.ScrollView", View, {
-		
+	var isDef = lang.isDef,
+
+		// The amount of deceleration (in pixels/ms^2)
+		deceleration = 0.001;
+
+	return declare("Ti.UI.ScrollView", KineticScrollView, {
+
 		constructor: function(args) {
-			
-			// Content must go in a separate container so the scrollbar can exist outside of it
-			var contentContainer = this._contentContainer = UI.createView({
-				width: "100%",
-				height: "100%",
-				left: 0,
-				top: 0
-			});
-			View.prototype.add.call(this,contentContainer);
-			style.set(contentContainer.domNode,"overflow","hidden");
-			
-			contentContainer.add(this._contentMeasurer = UI.createView({
+			var self = this,
+				contentContainer,
+				scrollbarTimeout;
+			this._initKineticScrollView(contentContainer = UI.createView({
 				width: UI.SIZE,
 				height: UI.SIZE,
+				_minWidth: "100%",
+				_minHeight: "100%",
 				left: 0,
 				top: 0
-			}));
-			style.set(this._contentMeasurer.domNode,"overflow","hidden");
-			
-			this._createHorizontalScrollBar();
-			this._createVerticalScrollBar();
-			
-			// Handle scrolling
-			var previousTouchLocation;
-			this.addEventListener("touchstart",function(e) {
-				previousTouchLocation = {x: e.x, y: e.y};
-				
-				this._startScrollBars({
-					x: contentContainer.domNode.scrollLeft / (this._contentMeasurer._measuredWidth - this._measuredWidth),
-					y: contentContainer.domNode.scrollTop / (this._contentMeasurer._measuredHeight - this._measuredHeight)
-				},
-				{
-					x: contentContainer._measuredWidth / (this._contentMeasurer._measuredWidth),
-					y: contentContainer._measuredHeight / (this._contentMeasurer._measuredHeight)
-				});
-				
-				this._isScrollBarActive && this.fireEvent("dragStart",{});
-			});
-			this.addEventListener("touchend",function(e) {
-				previousTouchLocation = null;
-				
-				this._endScrollBars();
-				
-				this._isScrollBarActive && this.fireEvent("dragEnd",{
-					decelerate: false
-				});
-			});
-			this.addEventListener("touchmove",lang.hitch(this,function(e) {
-				var scrollLeft = contentContainer.domNode.scrollLeft,
-					scrollTop = contentContainer.domNode.scrollTop;
-				contentContainer.domNode.scrollLeft += previousTouchLocation.x - e.x;
-				contentContainer.domNode.scrollTop += previousTouchLocation.y - e.y;
-				previousTouchLocation = {x: e.x, y: e.y};
-				
-				// Create the scroll event
-				this._isScrollBarActive && this.fireEvent("scroll",{
-					x: scrollLeft,
-					y: scrollTop,
-					dragging: true
-				});
-				
-				this._updateScrollBars({
-					x: scrollLeft / (this._contentMeasurer._measuredWidth - this._measuredWidth),
-					y: scrollTop / (this._contentMeasurer._measuredHeight - this._measuredHeight)
-				});
-			}));
-			var self = this;
-			this.domNode.addEventListener("mousewheel",function(e) {
-				self._startScrollBars({
-					x: contentContainer.domNode.scrollLeft / (self._contentMeasurer._measuredWidth - self._measuredWidth),
-					y: contentContainer.domNode.scrollTop / (self._contentMeasurer._measuredHeight - self._measuredHeight)
-				},
-				{
-					x: contentContainer._measuredWidth / (self._contentMeasurer._measuredWidth),
-					y: contentContainer._measuredHeight / (self._contentMeasurer._measuredHeight)
-				});
-				setTimeout(function(){
-					contentContainer.domNode.scrollLeft -= e.wheelDeltaX;
-					contentContainer.domNode.scrollTop -= e.wheelDeltaY;
-					
-					// Create the scroll event
-					self._isScrollBarActive && self.fireEvent("scroll",{
-						x: contentContainer.domNode.scrollLeft,
-						y: contentContainer.domNode.scrollTop,
-						dragging: false
-					});
-					self._updateScrollBars({
-						x: (contentContainer.domNode.scrollLeft - e.wheelDeltaX) / (self._contentMeasurer._measuredWidth - self._measuredWidth),
-						y: (contentContainer.domNode.scrollTop - e.wheelDeltaY) / (self._contentMeasurer._measuredHeight - self._measuredHeight)
-					});
-					setTimeout(function(){
-						self._endScrollBars();
-					},10);
-				},10);
+			}), "both", "both", 1);
+		},
+
+		_handleMouseWheel: function() {
+			this._isScrollBarActive && this.fireEvent("scroll",{
+				x: -this._currentTranslationX,
+				y: -this._currentTranslationY,
+				dragging: false,
+				decelerating: false
 			});
 		},
-		
-		scrollTo: function(x,y) {
-			x !== null && (this._contentContainer.scrollLeft = parseInt(x));
-			y !== null && (this._contentContainer.scrollTop = parseInt(y));
+
+		_handleDragStart: function() {
+			this.fireEvent("dragStart");
+		},
+
+		_handleDrag: function() {
+			this.fireEvent("scroll",{
+				x: -this._currentTranslationX,
+				y: -this._currentTranslationY,
+				dragging: true,
+				decelerating: false
+			});
+		},
+
+		_handleDragEnd: function(e, velocityX, velocityY) {
+			if (isDef(velocityX)) {
+				var self = this,
+					velocity = Math.sqrt(velocityX * velocityX + velocityY * velocityY),
+					distance = velocity * velocity / (1.724 * deceleration),
+					duration = velocity / deceleration,
+					theta = Math.atan(Math.abs(velocityY / velocityX)),
+					distanceX = distance * Math.cos(theta) * (velocityX < 0 ? -1 : 1),
+					distanceY = distance * Math.sin(theta) * (velocityY < 0 ? -1 : 1),
+					translationX = Math.min(0, Math.max(self._minTranslationX, self._currentTranslationX + distanceX)),
+					translationY = Math.min(0, Math.max(self._currentTranslationY + distanceY));
+				self.fireEvent("dragEnd",{
+					decelerate: true
+				});
+				self._animateToPosition(translationX, translationY, duration, "ease-out", function() {
+					self._setTranslation(translationX, translationY);
+					self._endScrollBars();
+					self.fireEvent("scrollEnd");
+				});
+			}
+		},
+
+		scrollTo: function(x, y) {
+			self._setTranslation(x !== null ? -x : this._currentTranslationX, y !== null ? -y : this._currentTranslationX);
 		},
 
 		_defaultWidth: UI.FILL,
 
 		_defaultHeight: UI.FILL,
-		
+
 		_getContentOffset: function(){
 			return this.contentOffset;
 		},
-		
-		_doLayout: function() {
-			this._contentMeasurer.layout = this.layout;
-			return View.prototype._doLayout.apply(this,arguments);
+
+		_preLayout: function() {
+			var needsRecalculation = this._contentContainer.layout === this.layout
+			this._contentContainer.layout = this.layout;
+			return needsRecalculation;
 		},
-		
+
 		add: function(view) {
-			this._contentMeasurer.add(view);
+			this._contentContainer._add(view);
+			this._publish(view);
 		},
-		
+
 		remove: function(view) {
-			this._contentMeasurer.remove(view);
+			this._contentContainer.remove(view);
+			this._unpublish(view);
 		},
 
 		properties: {
 			contentHeight: {
 				get: function(value) {
-					return this._contentMeasurer.height;
+					return this._contentContainer.height;
 				},
 				set: function(value) {
-					this._contentMeasurer.height = value;
+					this._contentContainer.height = value;
 					return value;
 				}
 			},
-			
+
 			contentOffset: {
 				get: function(value) {
-					return {x: this._contentContainer.domNode.scrollLeft, y: this._contentContainer.domNode.scrollTop}
+					return {
+						x: -this._currentTranslationX,
+						y: -this._currentTranslationY
+					};
 				},
 				set: function(value) {
-					this._contentContainer.domNode.scrollLeft = value.x;
-					this._contentContainer.domNode.scrollTop = value.y;
+					this._setTranslation(isDef(value.x) ? -value.x : this._currentTranslationX,
+						isDef(value.y) ? -value.y : this._currentTranslationY);
 					return value;
 				}
 			},
-			
+
 			contentWidth: {
 				get: function(value) {
-					return this._contentMeasurer.width;
+					return this._contentContainer.width;
 				},
 				set: function(value) {
-					this._contentMeasurer.width = value;
+					this._contentContainer.width = value;
 					return value;
 				}
 			},
 			
+			disableBounce: false,
+			
+			horizontalBounce: {
+				set: function(value) {
+					return this._horizontalElastic = value;
+				},
+				value: true
+			},
+
 			showHorizontalScrollIndicator: {
 				set: function(value, oldValue) {
 					if (value !== oldValue) {
@@ -8708,7 +9311,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang", "Ti/UI"],
 				},
 				value: true
 			},
-			
+
 			showVerticalScrollIndicator: {
 				set: function(value, oldValue) {
 					if (value !== oldValue) {
@@ -8719,6 +9322,13 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang", "Ti/UI"],
 						}
 					}
 					return value;
+				},
+				value: true
+			},
+			
+			verticalBounce: {
+				set: function(value) {
+					return this._verticalElastic = value;
 				},
 				value: true
 			}
@@ -8816,11 +9426,11 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 				this._previousDistance = currentDistance;
 				this._previousTime = currentTime;
 				if (!element._isGestureBlocked(this.name)) {
-					lang.hitch(element,element._handleTouchEvent(this.name,{
+					element._handleTouchEvent(this.name,{
 						scale: currentDistance / this._startDistance,
 						velocity: velocity,
 						source: this.getSourceNode(e,element)
-					}));
+					});
 				}
 			}
 		},
@@ -8980,11 +9590,12 @@ define(["Ti/_", "Ti/_/Evented", "Ti/_/lang", "Ti/Filesystem/File"],
 /* /titanium/Ti/UI.js */
 
 define(
-	["Ti/_", "Ti/_/Evented", "Ti/_/lang", "Ti/_/ready", "Ti/_/style", "Ti/_/dom"],
-	function(_, Evented, lang, ready, style, dom) {
+	["Ti/_", "Ti/_/Evented", "Ti/_/has", "Ti/_/lang", "Ti/_/ready", "Ti/_/style", "Ti/_/dom"],
+	function(_, Evented, has, lang, ready, style, dom) {
 
 	var global = window,
-		body = document.body,
+		doc = document,
+		body = doc.body,
 		on = require.on,
 		modules = "2DMatrix,ActivityIndicator,AlertDialog,Animation,Button,EmailDialog,ImageView,Label,OptionDialog,Picker,PickerColumn,PickerRow,ProgressBar,ScrollableView,ScrollView,Slider,Switch,Tab,TabGroup,TableView,TableViewRow,TableViewSection,TextArea,TextField,View,WebView,Window",
 		creators = {},
@@ -8993,18 +9604,20 @@ define(
 		iphone = handheld && handheld[0] === "iphone",
 		targetHeight = {},
 		hidingAddressBar,
-		hideAddressBar = finishAddressBar = function() {
+		finishAddressBar = function() {
 			Ti.UI._recalculateLayout();
 			hidingAddressBar = 0;
 		},
+		hideAddressBar = finishAddressBar,
+		splashScreen,
 		unitize = dom.unitize,
-		showStats = false;
+		Gesture;
 
 	on(body, "touchmove", function(e) {
 		e.preventDefault();
 	});
 
-	require.each(modules.split(','), function(name) {
+	modules.split(',').forEach(function(name) {
 		creators['create' + name] = function(args) {
 			return new (require("Ti/UI/" + name))(args);
 		};
@@ -9052,42 +9665,52 @@ define(
 	}
 
 	ready(10, function() {
-		var splashScreen = document.getElementById("splash"),
-			container = (Ti.UI._container = Ti.UI.createView({
-				left: 0,
-				top: 0
-			})),
-			node = container.domNode;
-		setStyle(node, "overflow", "hidden");
-		body.appendChild(node);
-		container.addEventListener("postlayout", function(){
-			setTimeout(function(){
-				setStyle(splashScreen,{
-					position: "absolute",
-					width: unitize(container._measuredWidth),
-					height: unitize(container._measuredHeight),
-					left: "0px",
-					top: "0px",
-					right: "",
-					bottom: ""
-				});
-			},10);
-		});
-		hideAddressBar();
+		setTimeout(function() {
+			var container = (Ti.UI._container = Ti.UI.createView({
+					left: 0,
+					top: 0
+				})),
+				node = container.domNode,
+				coefficients = container._layoutCoefficients;
+
+			coefficients.width.x1 = 1;
+			coefficients.height.x1 = 1;
+			container._measuredTop = 0;
+			container._measuredLeft = 0;
+			node.id = "TiUIContainer";
+			setStyle(node, "overflow", "hidden");
+			body.appendChild(node);
+
+			(splashScreen = doc.getElementById("splash")) && container.addEventListener("postlayout", function(){
+				setTimeout(function(){
+					setStyle(splashScreen,{
+						position: "absolute",
+						width: unitize(container._measuredWidth),
+						height: unitize(container._measuredHeight),
+						left: 0,
+						top: 0,
+						right: '',
+						bottom: ''
+					});
+				}, 10);
+			});
+			hideAddressBar();
+		}, 1);
 	});
-	
-	function updateOrientation() {
+
+	on(global, "resize", function() {
 		Ti.UI._recalculateLayout();
-		require("Ti/Gesture")._updateOrientation();
-	}
-	on(global, "resize", updateOrientation);
-	on(global, "orientationchange", updateOrientation);
+	});
 
 	return lang.setObject("Ti.UI", Evented, creators, {
 
 		_addWindow: function(win, set) {
 			this._container.add(win.modal ? win._modalParentContainer : win);
 			set && this._setWindow(win);
+
+			// as soon as we add a window or tabgroup, we can destroy the splash screen
+			splashScreen && dom.destroy(splashScreen);
+
 			return win;
 		},
 
@@ -9099,38 +9722,35 @@ define(
 			this._container.remove(win.modal ? win._modalParentContainer : win);
 			return win;
 		},
-		
+
 		_layoutSemaphore: 0,
-		
+
 		_nodesToLayout: [],
-		
+
 		_startLayout: function() {
 			this._layoutSemaphore++;
 		},
-		
+
 		_finishLayout: function() {
-			this._layoutSemaphore--;
-			if (this._layoutSemaphore === 0) {
+			if (--this._layoutSemaphore === 0) {
 				this._triggerLayout(true);
 			}
 		},
-		
+
 		_elementLayoutCount: 0,
-		
-		_layoutCount: 0,
-		
+
 		_triggerLayout: function(node, force) {
 			var self = this;
+
 			if (~self._nodesToLayout.indexOf(node)) {
 				return;
 			}
+
 			self._nodesToLayout.push(node);
+
 			function startLayout() {
-				
 				self._elementLayoutCount = 0;
-				self._layoutCount++;
-				var startTime = (new Date()).getTime(),
-					nodes = self._nodesToLayout,
+				var nodes = self._nodesToLayout,
 					layoutNode,
 					node,
 					parent,
@@ -9140,111 +9760,121 @@ define(
 					recursionStack,
 					rootNodesToLayout = [],
 					layoutRootNode = false,
-					breakAfterChildrenCalculations;
-					
+					breakAfterChildrenCalculations,
+					container = self._container,
+					i,
+					j,
+					len = nodes.length;
+
+				has("ti-instrumentation") && (self._layoutInstrumentationTest = instrumentation.startTest("Layout"));
+
 				// Determine which nodes need to be re-layed out
-				for (var i in nodes) {
+				for (i = 0; i < len; i++) {
 					layoutNode = nodes[i];
-						
-					// Mark all of the children for update that need to be updated
-					recursionStack = [layoutNode];
-					while (recursionStack.length > 0) {
-						node = recursionStack.pop();
-						node._markedForLayout = true;
-						children = node.children;
-						for (var j in children) {
-							child = children[j];
-							if (node.layout !== "composite" || child._isDependentOnParent() || !child._hasBeenLayedOut) {
-								recursionStack.push(child);
-							}
-						}
-					}
-					
-					// Go up and mark any other nodes that need to be marked
-					parent = layoutNode;
-					while(1) {
-						breakAfterChildrenCalculations = false;
-						if (!parent._parent) {
-							layoutRootNode = true;
-							break;
-						} else if(!parent._parent._hasSizeDimensions()) {
-							!parent._parent._markedForLayout && !~rootNodesToLayout.indexOf(parent._parent) && rootNodesToLayout.push(parent._parent);
-							if (parent._parent.layout !== "composite") {
-								breakAfterChildrenCalculations = true;
-							} else {
-								break;
-							}
-						}
-						
-						previousParent = parent;
-						parent = parent._parent;
-						recursionStack = [parent];
+					if (layoutNode._isAttachedToActiveWin()) {
+						// Mark all of the children for update that need to be updated
+						recursionStack = [layoutNode];
 						while (recursionStack.length > 0) {
 							node = recursionStack.pop();
-							children = node.children;
-							for (var j in children) {
+							node._markedForLayout = true;
+							children = node._children;
+							for (j in children) {
 								child = children[j];
-								if (child !== previousParent && (node.layout !== "composite" || child._isDependentOnParent())) {
-									child._markedForLayout = true;
+								if (node.layout !== "composite" || child._needsMeasuring || node._layout._isDependentOnParent(child)) {
 									recursionStack.push(child);
 								}
 							}
 						}
-						if (breakAfterChildrenCalculations) {
-							break;
+
+						if (layoutNode === container) {
+							layoutRootNode = true;
+						} else {
+							// Go up and mark any other nodes that need to be marked
+							parent = layoutNode;
+							while(1) {
+								parent._markedForLayout = true;
+								previousParent = parent;
+								parent = parent._parent;
+
+								// Check if this parent is the stopping point
+								breakAfterChildrenCalculations = false;
+								if (!parent || parent === container) {
+									layoutRootNode = true;
+									break;
+								} else if(!parent._hasSizeDimensions() && !parent._needsMeasuring) {
+									!parent._markedForLayout && !~rootNodesToLayout.indexOf(parent) && rootNodesToLayout.push(parent);
+									breakAfterChildrenCalculations = true;
+								}
+
+								// Recurse through the children of the parent
+								recursionStack = [parent];
+								while (recursionStack.length > 0) {
+									node = recursionStack.pop();
+									children = node._children;
+									for (j in children) {
+										child = children[j];
+										if (child !== previousParent && (node.layout !== "composite" || child._needsMeasuring || node._layout._isDependentOnParent(child))) {
+											child._markedForLayout = true;
+											recursionStack.push(child);
+										}
+									}
+								}
+
+								if (breakAfterChildrenCalculations) {
+									break;
+								}
+							}
 						}
 					}
 				}
-				
+
 				// Layout all nodes that need it
 				if (layoutRootNode) {
-					var container = self._container;
-					container._doLayout({
-					 	origin: {
-					 		x: 0,
-					 		y: 0
-					 	},
-					 	isParentSize: {
-					 		width: false,
-					 		height: false
-					 	},
-					 	boundingSize: {
-					 		width: global.innerWidth,
-					 		height: global.innerHeight
-					 	},
-					 	alignment: {
-					 		horizontal: "center",
-					 		vertical: "center"
-					 	},
-					 	positionElement: true,
-					 	layoutChildren: true
-				 	});
+					var container = self._container,
+						props = container.properties.__values__,
+						width = container._measuredWidth = props.width = global.innerWidth,
+						height = container._measuredHeight = props.height = global.innerHeight;
+					container._measuredSandboxWidth = width;
+					container._measuredSandboxHeight = height;
+					container.fireEvent("postlayout");
+					setStyle(container.domNode, {
+						width: width + "px",
+						height: height + "px"
+					});
+					container._layout._doLayout(container, width, height, false, false);
 				}
 				for (var i in rootNodesToLayout) {
 					node = rootNodesToLayout[i];
-					node._layout._doLayout(node, node._measuredWidth, node._measuredHeight, node._getInheritedWidth() === Ti.UI.SIZE, node._getInheritedHeight() === Ti.UI.SIZE);
+					node._layout._doLayout(node,
+						node._measuredWidth - node._borderLeftWidth - node._borderRightWidth,
+						node._measuredHeight - node._borderTopWidth - node._borderBottomWidth,
+						node._parent._layout._getWidth(node, node.width) === Ti.UI.SIZE,
+						node._parent._layout._getHeight(node, node.height) === Ti.UI.SIZE);
 				}
-				
-				showStats && console.debug("Layout " + self._layoutCount + ": " + self._elementLayoutCount + 
-					" elements laid out in " + ((new Date().getTime() - startTime)) + "ms");
-					
+
+				has("ti-instrumentation") && instrumentation.stopTest(self._layoutInstrumentationTest, 
+					self._elementLayoutCount + " out of approximately " + document.getElementById("TiUIContainer").getElementsByTagName("*").length + " elements laid out.");
+
 				self._layoutInProgress = false;
 				self._layoutTimer = null;
 				self._nodesToLayout = [];
 				
 				self.fireEvent("postlayout");
 			}
+
 			if (force) {
 				clearTimeout(self._layoutTimer);
 				self._layoutInProgress = true;
 				startLayout();
 			} else if (self._nodesToLayout.length === 1) {
 				self._layoutInProgress = true;
-				self._layoutTimer = setTimeout(function(){ startLayout(); }, 25);
+				self._layoutTimer = setTimeout(startLayout, 10);
 			}
 		},
-		
+
 		_recalculateLayout: function() {
+			Gesture || (Gesture = require("Ti/Gesture"));
+			Gesture._updateOrientation();
 			var container = this._container;
 			if (container) {
 				container.width = global.innerWidth;
@@ -9265,7 +9895,7 @@ define(
 			},
 			currentTab: void 0
 		},
-		
+
 		convertUnits: function(convertFromValue, convertToUnits) {
 			var intermediary = dom.computeSize(convertFromValue, 0, false);
 			switch(convertToUnits) {
@@ -9325,9 +9955,9 @@ define(
 			TEXT_AUTOCAPITALIZATION_NONE: 0,
 			TEXT_AUTOCAPITALIZATION_SENTENCES: 2,
 			TEXT_AUTOCAPITALIZATION_WORDS: 1,
-			TEXT_VERTICAL_ALIGNMENT_BOTTOM: 2,
-			TEXT_VERTICAL_ALIGNMENT_CENTER: 1,
-			TEXT_VERTICAL_ALIGNMENT_TOP: 3,
+			TEXT_VERTICAL_ALIGNMENT_BOTTOM: "bottom",
+			TEXT_VERTICAL_ALIGNMENT_CENTER: "center",
+			TEXT_VERTICAL_ALIGNMENT_TOP: "top",
 			ANIMATION_CURVE_EASE_IN: 1,
 			ANIMATION_CURVE_EASE_IN_OUT: 2,
 			ANIMATION_CURVE_EASE_OUT: 3,
@@ -9339,7 +9969,14 @@ define(
 			UNIT_MM: "mm",
 			UNIT_CM: "cm",
 			UNIT_IN: "in",
-			UNIT_DIP: "dp" // We don't have DIPs, so we treat them as pixels
+			UNIT_DIP: "dp", // We don't have DIPs, so we treat them as pixels
+			
+			// Hidden constants
+			_LAYOUT_COMPOSITE: "composite",
+			_LAYOUT_VERTICAL: "vertical",
+			_LAYOUT_HORIZONTAL: "horizontal",
+			_LAYOUT_CONSTRAINING_VERTICAL: "constrainingVertical",
+			_LAYOUT_CONSTRAINING_HORIZONTAL: "constrainingHorizontal"
 		}
 
 	});
@@ -9349,11 +9986,11 @@ define(
 "Ti/UI/TabGroup":function(){
 /* /titanium/Ti/UI/TabGroup.js */
 
-define(["Ti/_/declare", "Ti/_/css", "Ti/_/UI/SuperView", "Ti/UI/View", "Ti/UI", "Ti/_/lang", "Ti/_/style"], 
-	function(declare, css, SuperView, View, UI, lang, style) {
+define(["Ti/_/declare", "Ti/_/UI/SuperView", "Ti/UI/View", "Ti/UI", "Ti/_/lang"], 
+	function(declare, SuperView, View, UI, lang) {
 
 	var is = require.is,
-		setStyle = style.set,
+		UI_FILL = UI.FILL,
 		postUpdateTabsBackground = {
 			post: "_updateTabsBackground"
 		};
@@ -9361,65 +9998,62 @@ define(["Ti/_/declare", "Ti/_/css", "Ti/_/UI/SuperView", "Ti/UI/View", "Ti/UI", 
 	return declare("Ti.UI.TabGroup", SuperView, {
 
 		constructor: function(args){
-			
 			var self = this,
-				tabsAtBottom = self.constants.tabsAtBottom = lang.val(args && args.tabsAtBottom, self.constants.tabsAtBottom);
-			
-			// Create the tabBarContainer class
-			var TabBarContainer = declare("Ti._.UI.TabGroup.TabBarContainer", View, {
-				_doLayout: function(params) {
-					
-					var tabs = self.tabs,
-						numTabs = tabs.length,
-						totalDividerWidth = (numTabs - 1) * self.tabDividerWidth,
-						tabWidth = Math.floor((params.boundingSize.width - totalDividerWidth) / numTabs);
-					for (var i = 0; i < numTabs - 1; i++) {
-						tabs[i]._defaultWidth = tabWidth;
-					}
-					 // Make the last tab consume the remaining space. Fractional widths look really bad in tabs.
-					tabs[i] && (tabs[i]._defaultWidth = params.boundingSize.width - totalDividerWidth - tabWidth * (numTabs - 1));
-					
-					return View.prototype._doLayout.apply(this,arguments)
-				}
-			});
-			
+				tabsAtBottom = self.constants.tabsAtBottom = lang.val(args && args.tabsAtBottom, self.constants.tabsAtBottom),
+				TabBarContainer = declare(View, {
+					// set a declared class here so that it's not defined globally, yet we still are able
+					// to set a widget id and css class on the dom node.
+					declaredClass: "Ti.UI.TabBarContainer"
+				});
+
 			// Create the tab bar
 			self._tabBarContainer = new TabBarContainer({
-				width: UI.FILL,
-				layout: "horizontal"
+				width: UI_FILL,
+				layout: UI._LAYOUT_CONSTRAINING_HORIZONTAL
 			});
 			self.tabHeight = 75;
 
 			// Create the tab window container
 			self._tabContentContainer = UI.createView({
-				width: UI.FILL,
-				height: UI.FILL
+				width: UI_FILL,
+				height: UI_FILL
 			});
-			
+
 			// Add the windows ordered such that they respect tabsAtBottom
-			self.layout = "vertical";
+			self.layout = UI._LAYOUT_CONSTRAINING_VERTICAL;
 			self.tabs = [];
-			self.tabsAtBottom = args ? lang.val(args.tabsAtBottom, true) : true;
+			self.tabsAtBottom = lang.val(args && args.tabsAtBottom, true);
 		},
 
 		addTab: function(tab) {
 			// Initialize the tabs, if necessary
 			var tabs = this.tabs = this.tabs || [];
 			tabs.push(tab);
-			tab._tabGroup = this;
+			tab._setTabGroup(this);
 
 			// Set the active tab if there are currently no tabs, otherwise add a divider
 			if (tabs.length === 1) {
-				this.properties.activeTab = tab;
+				this.activeTab = tab;
 			} else {
-				this._tabBarContainer.add(this._createTabDivider());
+				this._tabBarContainer._add(this._createTabDivider());
 			}
-			
+
 			// Add the tab to the UI
-			this._tabBarContainer.add(tab);
-			
+			this._tabBarContainer._add(tab);
+
 			// Update the background on the tab
 			this._updateTabBackground(tab);
+
+			// Publish the tab
+			this._publish(tab);
+		},
+
+		_addTabContents: function(contents) {
+			this._tabContentContainer._add(contents);
+		},
+
+		_removeTabContents: function(contents) {
+			this._tabContentContainer._remove(contents);
 		},
 
 		removeTab: function(tab) {
@@ -9435,97 +10069,125 @@ define(["Ti/_/declare", "Ti/_/css", "Ti/_/UI/SuperView", "Ti/UI/View", "Ti/UI", 
 
 				// Update the active tab, if necessary
 				tab === this._activeTab && this._activateTab(tabs[0]);
+
+				// Unpublish the tab
+				this._unpublish(tab);
 			}
 		},
-		
+
 		_createTabDivider: function() {
 			return UI.createView({
 				width: this.tabDividerWidth,
-				height: UI.FILL,
+				height: UI_FILL,
 				backgroundColor: this.tabDividerColor
 			});
 		},
-		
-		_handleFocusBlurEvent: function(type) {
-			var previousTab = this._previousTab,
-				activeTab = this._activeTab,
-				tabs = this.tabs,
-				data = {
-					index: tabs.indexOf(activeTab),
-					previousIndex: tabs.indexOf(previousTab),
-					tab: activeTab,
-					previousTab: previousTab
-				};
-			if (previousTab) {
-				previousTab.window && previousTab.window._handleBlurEvent();
-				previousTab.fireEvent("blur",data);
-			}
-			SuperView.prototype["_handle" + type + "Event"].call(this,data);
-			activeTab.window && activeTab.window._handleFocusEvent();
-			activeTab.fireEvent("focus",data);
-		},
-		
-		_handleFocusEvent: function() {
-			this._handleFocusBlurEvent("Focus");
-		},
-		
-		_handleBlurEvent: function() {
-			this._handleFocusBlurEvent("Blur");
+
+		close: function() {
+			this._previousTab = null;
+			SuperView.prototype.close.call(this);
 		},
 
-		_activateTab: function(tab) {
+		_getEventData: function() {
 			var tabs = this.tabs,
-				prev = this._previousTab = this._activeTab;
-			
-			if (prev !== tab) {
-				if (prev) {
-					prev.active = false;
-					prev._doBackground();
-					prev._tabNavigationGroup && this._tabContentContainer.remove(prev._tabNavigationGroup);
+				previousTab = this._previousTab,
+				activeTab = this._activeTab;
+
+			return {
+				index: activeTab && tabs.indexOf(activeTab),
+				previousIndex: previousTab && tabs.indexOf(previousTab),
+				tab: activeTab,
+				previousTab: previousTab
+			};
+		},
+
+		_handleFocusEvent: function() {
+			// TabGroup was just opened or a window was closed and the TabGroup regained focus
+
+			var previousTab = this._previousTab,
+				activeTab = this._activeTab;
+
+			previousTab && previousTab._blur();
+
+			if (!this._focused && this._opened) {
+				this.fireEvent("focus", this._getEventData());
+				activeTab && activeTab._focus();
+			}
+			this._focused = 1;
+		},
+
+		_handleBlurEvent: function(blurTabs) {
+			// TabGroup is about to be closed or a window was opened
+
+			// blurTabs: 1) blur all tabs, 2) blur active tab only
+			if (blurTabs) {
+				var i = 0,
+					len = this.tabs.length,
+					tab;
+
+				while (i < len) {
+					tab = this.tabs[i++];
+					(blurTabs !== 2 || tab === this._activeTab) && tab._blur();
 				}
-	
-				tab.active = true;
-				tab._tabNavigationGroup && (tab._tabNavigationGroup.navBarAtTop = this.tabsAtBottom);
-				this._activeTab = tab;
-				UI.currentTab = tab;
-				tab._tabNavigationGroup && this._tabContentContainer.add(tab._tabNavigationGroup);
-				this._handleFocusEvent();
+
+				this._previousTab = void 0;
+			}
+
+			this._focused && this._opened && this.fireEvent("blur", this._getEventData());
+			this._focused = 0;
+		},
+
+		_activateTab: function(activeTab) {
+			var tabs = this.tabs,
+				previousTab = this._activeTab;
+
+			if (previousTab !== activeTab) {
+				if (this._previousTab = previousTab) {
+					previousTab.active = false;
+					previousTab._doBackground();
+				}
+
+				UI.currentTab = this._activeTab = activeTab;
+				activeTab.active = true;
+
 				this._updateTabsBackground();
 			}
 		},
-		
+
 		_updateTabBackground: function(tab) {
 			var prefix = tab.active ? "activeTab" : "tabs";
-			tab._defaultBackgroundColor = this[prefix + "BackgroundColor"];
-			tab._defaultBackgroundImage = this[prefix + "BackgroundImage"];
-			tab._defaultBackgroundFocusedColor = this[prefix + "BackgroundFocusedColor"];
-			tab._defaultBackgroundFocusedImage = this[prefix + "BackgroundFocusedImage"];
-			tab._defaultBackgroundDisabledColor = this[prefix + "BackgroundDisabledColor"];
-			tab._defaultBackgroundDisabledImage = this[prefix + "BackgroundDisabledImage"];
-			tab._defaultBackgroundSelectedColor = this[prefix + "BackgroundSelectedColor"];
-			tab._defaultBackgroundSelectedImage = this[prefix + "BackgroundSelectedImage"];
+
+			["", "Focused", "Disabled", "Selected"].forEach(function(s) {
+				s = "Background" + s;
+				tab["_default" + s + "Color"] = this[prefix + s + "Color"];
+				tab["_default" + s + "Image"] = this[prefix + s + "Image"];
+			}, this);
+
 			tab._doBackground();
 		},
-		
+
 		_updateTabsBackground: function() {
-			var tabs = this.tabs;
-			for (var i = 0; i < tabs.length; i++) {
-				this._updateTabBackground(tabs[i]);
+			var tabs = this.tabs,
+				i = 0,
+				l = tabs.length;
+			while (i < l) {
+				this._updateTabBackground(tabs[i++]);
 			}
 		},
-		
+
 		_updateDividers: function(){
-			var tabs = this._tabBarContainer.children;
-			for(var i = 1; i < tabs.length; i += 2) {
+			var tabs = this._tabBarContainer._children,
+				i = 1;
+			for(; i < tabs.length; i += 2) {
 				var tab = tabs[i];
 				tab.width = this.tabDividerWidth;
 				tab.backgroundColor = this.tabDividerColor;
 			}
 		},
 
-		_defaultWidth: UI.FILL,
+		_defaultWidth: UI_FILL,
 
-		_defaultHeight: UI.FILL,
+		_defaultHeight: UI_FILL,
 
 		properties: {
 			activeTab: {
@@ -9545,99 +10207,98 @@ define(["Ti/_/declare", "Ti/_/css", "Ti/_/UI/SuperView", "Ti/UI/View", "Ti/UI", 
 
 			tabs: {
 				set: function(value) {
-					var i,
-						tabBarContainer = this._tabBarContainer;
+					if (is(value, "Array")) {
+						var i,
+							tabBarContainer = this._tabBarContainer;
 
-					if (!is(value, "Array")) {
-						return;
-					}
+						tabBarContainer._removeAllChildren();
 
-					tabBarContainer._removeAllChildren();
-
-					if (value.length) {
-						this._activateTab(value[0]);
-						for (i = 0; i < value.length - 1; i++) {
-							tabBarContainer.add(value[i]);
-							tabBarContainer.add(this._createTabDivider());
+						if (value.length) {
+							this._activateTab(value[0]);
+							for (i = 0; i < value.length - 1; i++) {
+								this._publish(value[i]);
+								tabBarContainer._add(value[i]);
+								tabBarContainer._add(this._createTabDivider());
+							}
+							tabBarContainer._add(value[value.length - 1]); // No trailing divider
 						}
-						tabBarContainer.add(value[value.length - 1]); // No trailing divider
-					}
 
-					return value;
+						return value;
+					}
 				},
 				post: "_updateTabsBackground"
 			},
-			
+
 			tabsAtBottom: {
 				set: function(value, oldValue) {
 					if (value !== oldValue) {
-						
-						this._activeTab && this._activeTab._tabNavigationGroup && (this._activeTab._tabNavigationGroup.navBarAtTop = value);
-						
 						var tabContentContainer = this._tabContentContainer,
 							tabBarContainer = this._tabBarContainer;
-						this.remove(tabContentContainer);
-						this.remove(tabBarContainer);
-						
+
+						this._activeTab && this._activeTab._setNavBarAtTop(value);
+
+						this._remove(tabContentContainer);
+						this._remove(tabBarContainer);
+
 						if (value) {
-							this.add(tabContentContainer);
-							this.add(tabBarContainer);
+							this._add(tabContentContainer);
+							this._add(tabBarContainer);
 						} else {
-							this.add(tabBarContainer);
-							this.add(tabContentContainer);
+							this._add(tabBarContainer);
+							this._add(tabContentContainer);
 						}
 					}
 					return value;
 				}
 			},
-			
+
 			activeTabBackgroundColor: {
 				post: "_updateTabsBackground",
 				value: "#fff"
 			},
-			
+
 			activeTabBackgroundImage: postUpdateTabsBackground,
-			
+
 			activeTabBackgroundDisabledColor: {
 				post: "_updateTabsBackground",
 				value: "#888"
 			},
-			
+
 			activeTabBackgroundDisabledImage: postUpdateTabsBackground,
-			
+
 			activeTabBackgroundFocusedColor: {
 				post: "_updateTabsBackground",
 				value: "#ccc"
 			},
-			
+
 			activeTabBackgroundFocusedImage: postUpdateTabsBackground,
-			
+
 			activeTabBackgroundSelectedColor: {
 				post: "_updateTabsBackground",
 				value: "#ddd"
 			},
-			
+
 			activeTabBackgroundSelectedImage: postUpdateTabsBackground,
-			
+
 			tabsBackgroundColor: {
 				post: "_updateTabsBackground",
 				value: "#aaa"
 			},
-			
+
 			tabsBackgroundImage: postUpdateTabsBackground,
-			
+
 			tabsBackgroundDisabledColor: {
 				post: "_updateTabsBackground",
 				value: "#666"
 			},
-			
+
 			tabsBackgroundDisabledImage: postUpdateTabsBackground,
-			
+
 			tabsBackgroundFocusedColor: {
 				post: "_updateTabsBackground",
 				value: "#ccc"
 			},
-			
+
 			tabsBackgroundFocusedImage: postUpdateTabsBackground,
 			
 			tabsBackgroundSelectedColor: {
@@ -9648,16 +10309,12 @@ define(["Ti/_/declare", "Ti/_/css", "Ti/_/UI/SuperView", "Ti/UI/View", "Ti/UI", 
 			tabsBackgroundSelectedImage: postUpdateTabsBackground,
 			
 			tabDividerColor: {
-				post: function() {
-					this._updateDividers();
-				},
+				post: "_updateDividers",
 				value: "#555"
 			},
 			
 			tabDividerWidth: {
-				post: function() {
-					this._updateDividers();
-				},
+				post: "_updateDividers",
 				value: 1
 			},
 			
@@ -9801,7 +10458,7 @@ define(["Ti/_/Evented", "Ti/_/lang", "Ti/UI", "Ti/_/ready"], function(Evented, l
 				return api.portrait;
 			},
 
-			properties: {
+			constants: {
 				portrait: false,
 				landscape: false,
 				orientation: UI.UNKNOWN
@@ -9810,9 +10467,9 @@ define(["Ti/_/Evented", "Ti/_/lang", "Ti/UI", "Ti/_/ready"], function(Evented, l
 
 	function getWindowOrientation() {
 		var landscape = !!(window.innerWidth && (window.innerWidth > window.innerHeight));
-		api.orientation = landscape ? UI.LANDSCAPE_LEFT : UI.PORTRAIT;
-		api.landscape = landscape;
-		api.portrait = !landscape;
+		api.constants.__values__.orientation = landscape ? UI.LANDSCAPE_LEFT : UI.PORTRAIT;
+		api.constants.__values__.landscape = landscape;
+		api.constants.__values__.portrait = !landscape;
 		return api.orientation;
 	}
 	ready(function() {
@@ -9876,15 +10533,43 @@ define(["Ti/_/Evented", "Ti/_/lang", "Ti/UI", "Ti/_/ready"], function(Evented, l
 
 define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 
-	var api = {};
+	var api = {},
+		global = window,
+		con = global.console,
+		i = 0,
+		last,
 
-	require.each(["debug", "error", "info", "log", "warn"], function(fn) {
-		api[fn] = function() {
-			console[fn]("[" + fn.toUpperCase() + "] " + lang.toArray(arguments).map(function(a) {
-				return require.is(a, "Object") ? a.hasOwnProperty("toString") ? a.toString() : JSON.stringify(a) : a === null ? "null" : a === void 0 ? "undefined" : a;
-			}).join(' '));
-		};
+		// the order of these DOES matter... it uses the last known function
+		// (i.e. if trace() does not exist, it'll use debug() for trace)
+		fns = ["debug", "trace", "error", "fatal", "critical", "info", "notice", "log", "warn"];
+
+	// console.*() shim
+	con === void 0 && (con = global.console = {});
+
+	// make sure "log" is always at the end
+	["debug", "info", "warn", "error", "log"].forEach(function(c) {
+		con[c] || (con[c] = ("log" in con)
+			?	function () {
+					var a = Array.apply({}, arguments);
+					a.unshift(c + ":");
+					con.log(a.join(" "));
+				}
+			:	function () {}
+		);
 	});
+
+	con.trace = 0; // need to undefine trace() since it does something completely different
+
+	for (; i < 9; i++) {
+		(function(fn) {
+			var ls = last = console[fn] ? fn : last;
+			api[fn] = function() {
+				console[ls]("[" + fn.toUpperCase() + "] " + lang.toArray(arguments).map(function(a) {
+					return require.is(a, "Object") ? a.hasOwnProperty("toString") ? a.toString() : JSON.stringify(a) : a === null ? "null" : a === void 0 ? "undefined" : a;
+				}).join(' '));
+			};
+		})(fns[i]);
+	}
 
 	return lang.setObject("Ti.API", Evented, api);
 
@@ -9931,7 +10616,8 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 "Ti/UI/2DMatrix":function(){
 /* /titanium/Ti/UI/2DMatrix.js */
 
-define(["Ti/_/declare", "Ti/_/Evented", "Ti/Platform"], function(declare, Evented, Platform) {
+define(["Ti/_/declare", "Ti/_/Evented", "Ti/_/lang", "Ti/Platform"],
+	function(declare, Evented, lang, Platform) {
 
 	var isFF = Platform.runtime === "gecko",
 		api,
@@ -10004,11 +10690,11 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/Platform"], function(declare, Evente
 		},
 
 		scale: function(x, y) {
-			return new api(mult(this, x, 0, 0, y, 0, 0));
+			return new api(mult(this, x, 0, 0, lang.val(y, x), 0, 0));
 		},
 
 		translate: function(x, y) {
-			return new api(mult(this, 0, 0, 0, 0, x, y));
+			return new api(mult(this, 1, 0, 0, 1, x, y));
 		},
 
 		toCSS: function() {
@@ -10040,7 +10726,7 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/Platform"], function(declare, Evente
  * <http://dojotoolkit.org>
  */
 
-define(function() {
+define(["Ti/_/has"], function(has) {
 	var global = this,
 		hitch,
 		is = require.is;
@@ -10050,7 +10736,7 @@ define(function() {
 	}
 
 	function hitchArgs(scope, method) {
-		var pre = toArray(arguments, 2);
+		var pre = toArray(arguments, 2),
 			named = is(method, "String");
 		return function() {
 			var s = scope || global,
@@ -10090,7 +10776,7 @@ define(function() {
 			var d, i, p, v, special = { properties: 1, constants: 0 };
 			for (p in src) {
 				if (src.hasOwnProperty(p) && !/^(constructor|__values__)$/.test(p)) {
-					if (p in special) {
+					if (special.hasOwnProperty(p)) {
 						d = dest[p] || (dest[p] = {});
 						d.__values__ || (d.__values__ = {});
 						for (i in src[p]) {
@@ -10138,7 +10824,7 @@ define(function() {
 									enumerable: true
 								});
 
-								if (require.has("declare-property-methods") && (writable || property.toUpperCase() !== property)) {
+								if (has("declare-property-methods") && (writable || property.toUpperCase() !== property)) {
 									externalDest["get" + capitalizedName] = function() { return internalDest[property]; };
 									writable && (externalDest["set" + capitalizedName] = function(v) { return internalDest[property] = v; });
 								}
@@ -10211,15 +10897,17 @@ define(function() {
 			var enc = encodeURIComponent,
 				pairs = [],
 				prop,
-				value;
+				value,
+				i,
+				l;
 
 			for (prop in obj) {
 				if (obj.hasOwnProperty(prop)) {
 					is(value = obj[prop], "Array") || (value = [value]);
 					prop = enc(prop) + "=";
-					require.each(value, function(v) {
-						pairs.push(prop + enc(v));
-					});
+					for (i = 0, l = value.length; i < l;) {
+						pairs.push(prop + enc(value[i++]));
+					}
 				}
 			}
 
@@ -10227,10 +10915,70 @@ define(function() {
 		},
 
 		val: function(originalValue, defaultValue) {
-			return is(originalValue, "Undefined") ? defaultValue : originalValue;
+			return originalValue === void 0 ? defaultValue : originalValue;
 		}
 	};
 });
+},
+"Ti/_/has":function(){
+/* /titanium/Ti/_/has.js */
+
+define(function() {
+
+	var cfg = require.config,
+		hasCache = cfg.hasCache || {},
+		global = window,
+		doc = global.document,
+		el = doc.createElement("div"),
+		i;
+
+	function has(name) {
+		// summary:
+		//		Determines of a specific feature is supported.
+		//
+		// name: String
+		//		The name of the test.
+		//
+		// returns: Boolean (truthy/falsey)
+		//		Whether or not the feature has been detected.
+
+		var fn = hasCache[name];
+		require.is(fn, "Function") && (fn = hasCache[name] = fn(global, doc, el));
+		return fn;
+	}
+
+	has.add = function hasAdd(name, test, now, force){
+		// summary:
+		//		Adds a feature test.
+		//
+		// name: String
+		//		The name of the test.
+		//
+		// test: Function
+		//		The function that tests for a feature.
+		//
+		// now: Boolean?
+		//		If true, runs the test immediately.
+		//
+		// force: Boolean?
+		//		If true, forces the test to override an existing test.
+
+		if (hasCache[name] === void 0 || force) {
+			hasCache[name] = test;
+		}
+		return now && has(name);
+	};
+
+	// run all feature detection tests
+	for (i in cfg.has) {
+		has.add(i, cfg.has[i], 0, true);
+	}
+	delete cfg.has;
+
+	return has;
+
+});
+
 },
 "Ti/UI/WebView":function(){
 /* /titanium/Ti/UI/WebView.js */
@@ -10248,6 +10996,8 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/event", "Ti/_/lang",
 			}));
 			this.backgroundColor = "#fff";
 		},
+
+		_preventDefaultTouchEvent: false,
 
 		destroy: function() {
 			App.removeEventListener(this.widgetId + ":unload");
@@ -10267,8 +11017,8 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/event", "Ti/_/lang",
 				this._destroy();
 				this._loading(1);
 
-				var url = this.url,
-					match = this.url.match(/(https?)\:\/\/([^\:\/]*)(:?\d*)(.*)/),
+				var url = this.url || "",
+					match = url.match(/(https?)\:\/\/([^\:\/]*)(:?\d*)(.*)/),
 					loc = window.location,
 					isSameDomain = !match || (match[0] + ":" === loc.protocol && match[1] + match[2] === window.location.host),
 					iframe = this._iframe = dom.create("iframe", {
@@ -10286,11 +11036,12 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/event", "Ti/_/lang",
 					}, this.domNode);
 
 				this._iframeHandles = [
-					require.on(iframe, "load", this, function(evt) {
+					on(iframe, "load", this, function(evt) {
 						var i = Math.max(isSameDomain | 0, 0),
 							cw = iframe.contentWindow,
 							prop,
-							url;
+							url,
+							html;
 
 						if (i !== -1) {
 							// we can always guarantee that the first load we'll know if it's the same domain
@@ -10306,7 +11057,7 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/event", "Ti/_/lang",
 						if (i > 0) {
 							url = cw.location.href;
 							this.evalJS(bridge.replace("WEBVIEW_ID", this.widgetId + ":unload"));
-							this.html && this._setContent(this.html);
+							(html = this.properties.__values__.html) && this._setContent(html);
 						} else {
 							API.warn("Unable to inject WebView bridge into cross-domain URL, ignore browser security message");
 						}
@@ -10316,7 +11067,7 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/event", "Ti/_/lang",
 							url: url ? (this.properties.__values__.url = url) : this.url
 						});
 					}),
-					require.on(iframe, "error", this, function() {
+					on(iframe, "error", this, function() {
 						this._loading();
 						this.fireEvent("error", {
 							message: "Page failed to load",
@@ -10444,14 +11195,13 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/event", "Ti/_/lang",
 			html: {
 				get: function(value) {
 					var doc = this._iframe && this._getDoc();
-					if (doc) {
-						return doc.documentElement.innerHTML;
-					}
+					return value === void 0 && doc ? doc.documentElement.innerHTML : value;
 				},
-				set: function(value) {
-					this.properties.__values__.url = "";
+				post: function(value) {
+					var values = this.properties.__values__;
+					values.data = void 0;
+					values.url = void 0;
 					this._createIFrame() && this._setContent(value);
-					return value;
 				}
 			},
 
@@ -10511,6 +11261,9 @@ define(["Ti/_/lang"], function(lang) {
 			/^\//.test(path) && (path = path.substring(1));
 			return /^\/\//.test(path) || ~path.indexOf("://") ? path : location.pathname.replace(/(.*)\/.*/, "$1") + "/" + path;
 		},
+		isBinaryMimeType: function(type) {
+			return /^(application|image|audio|video)\/(?!javascript|x\-javascript|atom\+xml|rss\+xml)/.test(type);
+		},
 		uuid: function() {
 			/**
 			 * Math.uuid.js (v1.4)
@@ -10566,11 +11319,19 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 define(["Ti/_/declare", "Ti/Gesture", "Ti/Locale", "Ti/_/UI/SuperView", "Ti/UI"],
 	function(declare, Gesture, Locale, SuperView, UI) {
 
+	var UI_FILL = UI.FILL,
+		UI_SIZE = UI.SIZE,
+		postNavGroup = {
+			post: function () {
+				this._navGroup && this._navGroup._updateNavBar();
+			}
+		};
+
 	return declare("Ti.UI.Window", SuperView, {
 	
-		_defaultWidth: UI.FILL,
+		_defaultWidth: UI_FILL,
 
-		_defaultHeight: UI.FILL,
+		_defaultHeight: UI_FILL,
 
 		postscript: function() {
 			if (this.url) {
@@ -10590,20 +11351,21 @@ define(["Ti/_/declare", "Ti/Gesture", "Ti/Locale", "Ti/_/UI/SuperView", "Ti/UI"]
 		},
 
 		properties: {
+		
 			modal: {
 				set: function(value, oldValue) {
 					if (value !== oldValue) {
 						if (value) {
 							var parentContainer = this._modalParentContainer = UI.createView();
-							parentContainer.add(UI.createView({
+							parentContainer._add(UI.createView({
 								backgroundColor: "#000",
 								opacity: 0.5
 							}));
-							parentContainer.add(this._modalContentContainer = UI.createView({
-								width: UI.SIZE,
-								height: UI.SIZE
+							parentContainer._add(this._modalContentContainer = UI.createView({
+								width: UI_SIZE,
+								height: UI_SIZE
 							}));
-							this._modalContentContainer.add(this);
+							this._modalContentContainer.add(this); // We call the normal .add() method to hook into the views proper add mechanism
 						} else if (this._modalParentContainer) {
 							this._modalParentContainer._opened && this._modalParentContainer.close();
 							this._modalContentContainer.remove(this);
@@ -10623,10 +11385,28 @@ define(["Ti/_/declare", "Ti/Gesture", "Ti/Locale", "Ti/_/UI/SuperView", "Ti/UI"]
 					return Gesture.orientation;
 				}
 			},
+		
+			/** Nav group properties **/
+			
+			barColor: postNavGroup,
+			
+			barImage: postNavGroup,
+			
+			leftNavButton: postNavGroup,
+			
+			navBarHidden: postNavGroup,
+			
+			rightNavButton: postNavGroup,
+			
+			titleControl: postNavGroup,
+			
+			titleImage: postNavGroup,
 
-			title: void 0,
+			title: postNavGroup,
 
-			titleid: void 0
+			titleid: postNavGroup,
+			
+			translucent: postNavGroup
 		}
 
 	});
@@ -10682,7 +11462,7 @@ define(["Ti/_", "Ti/_/browser", "Ti/_/Evented", "Ti/_/lang", "Ti/Locale", "Ti/_/
 					hiddenIFrame.contentWindow.location.href = url;
 				} else { 
 					var win = UI.createWindow({
-							layout: "vertical",
+							layout: UI._LAYOUT_CONSTRAINING_VERTICAL,
 							backgroundColor: "#888"
 						}),
 						backButton = UI.createButton({
@@ -10800,17 +11580,34 @@ define(["Ti/_", "Ti/_/string", "Ti/Filesystem"], function(_, string, Filesystem)
 						: "url(" + (require.cache(url) || _.getAbsolutePath(url)) + ")";
 		},
 
-		get: function(node, name) {
-			if (is(name, "Array")) {
-				for (var i = 0; i < name.length; i++) {
-					name[i] = node.style[name[i]];
+		get: function get(node, name) {
+			var i = 0,
+				x,
+				uc;
+			while (i < vp.length) {
+				x = vp[i++];
+				x += x ? uc || (uc = string.capitalize(name)) : name;
+				if (x in node.style) {
+					return node.style[x];
 				}
-				return name;
 			}
-			return node.style[name];
 		},
 
-		set: set
+		set: set,
+		
+		supports: function(name, node) {
+			var i = 0,
+				x,
+				uc;
+			
+			while (i < vp.length) {
+				x = vp[i++];
+				x += x ? uc || (uc = string.capitalize(name)) : name;
+				if (x in node.style) {
+					return true;
+				}
+			}
+		}
 	};
 });
 },
@@ -10889,7 +11686,8 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 		MapView = declare("Ti.Map.View", View, {
 
 			constructor: function() {
-				this.properties.annotations = [];
+				this.properties.__values__.annotations = [];
+				this._annotationMap = {};
 				this._routes = [];
 				this.fireEvent("loading");
 			},
@@ -10923,7 +11721,8 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 			addAnnotation: function(/*Object|Ti.Map.Annotation*/a) {
 				if (a) {
 					a.declaredClass === "Ti.Map.Annotation" || (a = new Annotation(a));
-					~this.annotations.indexOf(a) || this._createMarker(a, this.annotations.length);
+					~this.annotations.indexOf(a) || this._createMarker(a);
+					a.title && (this._annotationMap[a.title] = a);
 				}
 			},
 
@@ -10946,27 +11745,28 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 			},
 
 			deselectAnnotation: function(/*String|Ti.Map.Annotation*/a) {
-				var idx = this._indexOfAnnotation(a);
-				theInfoWindow && theInfoWindow.idx === idx && this._hide(this.annotations[idx]);
+				require.is(a, "String") && (a = this._annotationMap[a]);
+				a && theInfoWindow && theInfoWindow.widgetId === a.widgetId && this._hide(a);
 			},
 
 			removeAllAnnotations: function() {
 				theInfoWindow && theInfoWindow.close();
-				this.removeAnnotations(this.annotations);
+				while (this.annotations.length) {
+					this.removeAnnotation(this.annotations[0]);
+				}
 			},
 
 			removeAnnotation: function(/*String|Ti.Map.Annotation*/a) {
-				var anno = this.properties.annotations,
-					i = 0,
-					idx = this._indexOfAnnotation(a);
-
-				if (a = anno[idx]) {
+				require.is(a, "String") && (a = this._annotationMap[a]);
+				if (a) {
+					var annotations = this.properties.__values__.annotations,
+						p = annotations.indexOf(a);
 					theInfoWindow && this._hide(a);
 					gevent.removeListener(a.evt);
 					a.marker.setMap(null);
 					delete a.marker;
 					a.destroy();
-					anno[idx] = null;
+					~p && annotations.splice(p, 1);
 				}
 			},
 
@@ -10991,8 +11791,8 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 			},
 
 			selectAnnotation: function(/*String|Ti.Map.Annotation*/a) {
-				var idx = this._indexOfAnnotation(a);
-				~idx && this._show(this.annotations[idx]);
+				require.is(a, "String") && (a = this._annotationMap[a]);
+				a && this._show(a);
 			},
 
 			setLocation: function(location) {
@@ -11009,9 +11809,9 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 			},
 
 			_show: function(annotation, clicksource) {
-				if (annotation && (!theInfoWindow || theInfoWindow.idx !== annotation.idx)) {
+				if (annotation && (!theInfoWindow || theInfoWindow.widgetId !== annotation.widgetId)) {
 					var _t = this,
-						idx = annotation.idx,
+						widgetId = annotation.widgetId,
 						cls = "TiMapAnnotation",
 						type,
 						p = dom.create("div", { className: cls }),
@@ -11027,8 +11827,6 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 						shown;
 
 					function onShow() {
-						var i = theInfoWindow.idx;
-						i !== void 0 && ~i && i !== idx && _t._hide(_t.annotations[i]);
 						shown || (shown = 1) && _t._dispatchEvents(annotation, clicksource);
 					}
 
@@ -11044,18 +11842,22 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 					}
 
 					// listen for updates to the annotation object
-					_t._annotationEvents.push(on(annotation, "update", function(args) {
-						if (theInfoWindow.idx === idx) {
+					_t._annotationEvents.push(on(annotation, "update", this, function(args) {
+						if (theInfoWindow.widgetId === widgetId) {
 							var p = args.property,
-								markerImg;
+								v = args.value,
+								markerImg,
+								amap = this._annotationMap;
 							switch (p) {
 								case "title":
 								case "subtitle":
-									nodes[p].innerHTML = args.value;
+									nodes[p].innerHTML = v;
+									delete amap[args.oldValue];
+									v && (amap[v] = annotation);
 									break;
 								case "leftButton":
 								case "rightButton":
-									nodes[p].src = args.value;
+									nodes[p].src = v;
 									break;
 								case "image":
 								case "pincolor":
@@ -11078,20 +11880,20 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 					}
 
 					theInfoWindow.open(_t._gmap, annotation.marker);
-					theInfoWindow.idx = idx;
+					theInfoWindow.widgetId = annotation.widgetId;
 				}
 			},
 
 			_hide: function(annotation, clicksource) {
 				if (!clicksource || !~clicksource.indexOf("Button")) {
 					theInfoWindow.close();
-					theInfoWindow.idx = -1;
+					theInfoWindow.widgetId = 0;
 				}
 				this._dispatchEvents(annotation, clicksource);
 			},
 
 			_dispatchEvents: function(annotation, clicksource) {
-				var idx = annotation.idx,
+				var idx = this.annotations.indexOf(annotation),
 					props = {
 						annotation: annotation,
 						clicksource: clicksource = clicksource || "pin",
@@ -11128,7 +11930,6 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 
 			_createMarker: function(a, i) {
 				var markerImg = this._getMarkerImage(a);
-				a.idx = i;
 				a.evt = gevent.addListener(a.marker = new gmaps.Marker({
 					map: this._gmap,
 					icon: markerImg[0],
@@ -11138,25 +11939,10 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 					title: a._getTitle(),
 					animation: a.animate && gmaps.Animation.DROP
 				}), "click", lang.hitch(this, function() {
-					this[theInfoWindow && theInfoWindow.idx === i ? "_hide" : "_show"](a);
+					this[theInfoWindow && theInfoWindow.widgetId === a.widgetId ? "_hide" : "_show"](a);
 				}));
-				this.properties.__values__.annotations[i] = a;
-			},
 
-			_indexOfAnnotation: function(/*String|Ti.Map.Annotation*/a) {
-				var anno = this.properties.annotations,
-					i = 0;
-
-				if (a && a.declaredClass === "Ti.Map.Annotation") {
-					return a.idx;
-				}
-
-				for (; i < anno.length; i++) {
-					if (anno[i].title === a) {
-						return i;
-					}
-				}
-				return -1;
+				this.properties.__values__.annotations.push(a);
 			},
 
 			_fitRegion: function() {
@@ -11304,7 +12090,7 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/event", "Ti/_/lang", "Ti/App/Propertie
 		onload();
 	};
 
-	require(["http://maps.googleapis.com/maps/api/js?key=" + Properties.getString("ti.map.apikey", "") + "&sensor=true&callback=TiMapViewInit"]);
+	require(["//maps.googleapis.com/maps/api/js?key=" + Properties.getString("ti.map.apikey", "") + "&sensor=true&callback=TiMapViewInit"], 0, onload);
 
 	return MapView;
 
@@ -11328,6 +12114,9 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 			},
 			"List": function(value) {
 				return require.is(value, "Array") ? value : [value];
+			},
+			"Object": function(value) {
+				return value;
 			},
 			"String": function(value) {
 				return "" + value;
@@ -11366,13 +12155,13 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 
 	function getProp(prop, type, defaultValue) {
 		var value = getStorage(prop);
-		return value === void 0 ? defaultValue || null : types[type] ? types[type](value) : value;
+		return value === void 0 ? lang.val(defaultValue, null) : types[type] ? types[type](value) : value;
 	}
 
 	function setProp(prop, type, value) {
 		if (prop) {
 			getStorage();
-			if (value === void 0) {
+			if (value === void 0 || value === null) {
 				delete storage[prop];
 			} else {
 				storage[prop] = types[type] ? types[type](value) : value;
@@ -11424,7 +12213,8 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/lang", "Ti/_/ready", "Ti/_/style", "Ti
 
 		_setFont: function(font,domNode) {
 			if (font) {
-				require.is(font.fontSize, "Number") && (font.fontSize = dom.unitize(font.fontSize));
+				var fontSize = parseInt(font.fontSize);
+				font.fontSize = isNaN(fontSize) ? void 0 : (fontSize + "px");
 				style.set(domNode, font);
 			} else {
 				style.set(domNode,{
@@ -11492,97 +12282,127 @@ define(["Ti/_/declare", "Ti/_/dom", "Ti/_/lang", "Ti/_/ready", "Ti/_/style", "Ti
 "Ti/UI/Tab":function(){
 /* /titanium/Ti/UI/Tab.js */
 
-define(["Ti/_/declare", "Ti/UI/View", "Ti/_/dom", "Ti/Locale", "Ti/UI"],
-	function(declare, View, dom, Locale, UI) {
+define(["Ti/_/declare", "Ti/UI/View", "Ti/_/dom", "Ti/Locale", "Ti/UI", "Ti/UI/MobileWeb"],
+	function(declare, View, dom, Locale, UI, MobileWeb) {
 
 	var postTitle = {
-		post: "_setTitle"
-	};
+			post: function() {
+				this._tabTitle.text = this._getTitle();
+			}
+		},
+		UI_FILL = UI.FILL,
+		UI_SIZE = UI.SIZE;
 
 	return declare("Ti.UI.Tab", View, {
 
 		constructor: function(args) {
-			var container = this._contentContainer = dom.create("div", {
-				className: "TiUITabContentContainer",
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxOrient: "vertical",
-					boxPack: "center",
-					boxAlign: "center"
+			var win = args && args.window,
+				container = UI.createView({
+					layout: UI._LAYOUT_CONSTRAINING_VERTICAL,
+					width: "100%",
+					height: UI_SIZE
+				}),
+				navGroup = this._tabNavigationGroup = MobileWeb.createNavigationGroup({ window: win, _tab: this });;
+
+			this._add(container);
+
+			container._add(this._tabIcon = UI.createImageView({
+				height: UI_SIZE,
+				width: UI_SIZE
+			}));
+
+			container._add(this._tabTitle = UI.createLabel({
+				width: "100%",
+				wordWrap: true,
+				textAlign: UI.TEXT_ALIGNMENT_CENTER
+			}));
+
+			win && require.on(this, "singletap", this, function(e) {
+				var tabGroup = this._tabGroup;
+				if (tabGroup) {
+					if (tabGroup.activeTab === this) {
+						navGroup._reset();
+					} else {
+						tabGroup.activeTab = this;
+					}
 				}
-			}, this.domNode);
-
-			this._tabIcon = dom.create("img", {
-				className: "TiUITabImage"
-			}, container);
-
-			this._tabTitle = dom.create("div", {
-				className: "TiUITabTitle",
-				style: {
-					whiteSpace: "nowrap",
-					pointerEvents: "none",
-					userSelect: "none"
-				}
-			}, container);
-
-			var self = this;
-			this.addEventListener("singletap", function(e) {
-				self._tabGroup && self._tabGroup.setActiveTab(self);
 			});
 		},
 
-		_defaultWidth: UI.FILL,
+		_defaultWidth: UI_FILL,
 
-		_defaultHeight: UI.FILL,
-
-		_tabGroup: null,
-
-		_tabNavigationGroup: null,
+		_defaultHeight: UI_FILL,
 
 		open: function(win, options) {
-			if (this._tabNavigationGroup) {
-				this._tabNavigationGroup.open(win, options);
-			} else {
-				this.window = win;
-			}
+			this._tabNavigationGroup.open(win, options);
 		},
 
 		close: function(win, options) {
 			this._tabNavigationGroup.close(win, options);
 		},
 
-		_setTitle: function() {
-			this._tabTitle.innerHTML = Locale._getString(this.titleid, this.title);
+		_focus: function() {
+			this.fireEvent("focus", this._tabGroup._getEventData());
+			var win = this._tabNavigationGroup._getTopWindow();
+			if (win) {
+				if (this._tabGroup && this._tabGroup._opened && !win._opened) {
+					win._opened = 1;
+					win.fireEvent("open");
+				}
+				win._handleFocusEvent();
+			}
+		},
+
+		_blur: function() {
+			var win = this._tabNavigationGroup._getTopWindow();
+			win && win._handleBlurEvent();
+			this.fireEvent("blur", this._tabGroup._getEventData());
+		},
+
+		_getTitle: function() {
+			return Locale._getString(this.titleid, this.title);
+		},
+
+		_setTabGroup: function(tabGroup) {
+			this._tabGroup = tabGroup;
+			this._tabNavigationGroup.navBarAtTop = tabGroup.tabsAtTop;
+			this._win && (this._win.tabGroup = tabGroup);
+		},
+
+		_setNavBarAtTop: function(value) {
+			this._tabNavigationGroup.navBarAtTop = value;
 		},
 
 		properties: {
 			active: {
-				get: function(value) {
+				get: function() {
 					return this._tabGroup && this._tabGroup.activeTab === this;
+				},
+				post: function(value) {
+					var tabGroup = this._tabGroup,
+						navGroup = this._tabNavigationGroup,
+						doEvents = tabGroup._focused && tabGroup._opened;
+					if (value) {
+						navGroup.navBarAtTop = tabGroup.tabsAtBottom;
+						navGroup._updateNavBar();
+						tabGroup._addTabContents(navGroup);
+						doEvents && this._focus();
+					} else {
+						tabGroup._removeTabContents(navGroup);
+						doEvents && this._blur();
+					}
 				}
 			},
 
 			icon: {
 				set: function(value) {
-					return this._tabIcon.src = value;
+					return this._tabIcon.image = value;
 				}
 			},
 
 			title: postTitle,
 
-			titleid: postTitle,
-
-			window: {
-				set: function(value) {
-					var tabGroup = this._tabGroup;
-					this._tabNavigationGroup = UI.MobileWeb.createNavigationGroup({
-						window: value,
-						navBarAtTop: tabGroup && tabGroup.tabsAtTop
-					});
-					this.active && tabGroup && tabGroup.setActiveTab(this); // Force the new nav group to get attached
-					return value;
-				}
-			}
+			titleid: postTitle
 		}
 
 	});
@@ -11659,8 +12479,8 @@ define(["Ti/_/lang"], function(lang) {
 "Ti/Network/HTTPClient":function(){
 /* /titanium/Ti/Network/HTTPClient.js */
 
-define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/Blob", "Ti/_/event"],
-	function(_, declare, lang, Evented, Network, Blob, event) {
+define(["Ti/_", "Ti/_/declare", "Ti/_/has", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/Blob", "Ti/_/event"],
+	function(_, declare, has, lang, Evented, Network, Blob, event) {
 
 	var is = require.is,
 		on = require.on;
@@ -11672,12 +12492,12 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 
 			this._handles = [
 				on(xhr, "error", this, "_onError"),
-				on(xhr.upload, "error", this, "_onError"),
+				xhr.upload && on(xhr.upload, "error", this, "_onError"),
 				on(xhr, "progress", this, function(evt) {
 					evt.progress = evt.lengthComputable ? evt.loaded / evt.total : false;
 					is(this.ondatastream, "Function") && this.ondatastream.call(this, evt);
 				}),
-				on(xhr.upload, "progress", this, function(evt) {
+				xhr.upload && on(xhr.upload, "progress", this, function(evt) {
 					evt.progress = evt.lengthComputable ? evt.loaded / evt.total : false;
 					is(this.onsendstream, "Function") && this.onsendstream.call(this, evt);
 				})
@@ -11706,6 +12526,7 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 								mimeType: xhr.getResponseHeader("Content-Type")
 							});
 							c.responseXML = xhr.responseXML;
+							has("ti-instrumentation") && (instrumentation.stopTest(this._requestInstrumentationTest, this.location));
 							is(this.onload, "Function") && this.onload.call(this);
 						} else {
 							xhr.status / 100 | 0 > 3 && this._onError();
@@ -11753,13 +12574,12 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 		open: function(method, url, async) {
 			var httpURLFormatter = Ti.Network.httpURLFormatter,
 				c = this.constants,
-				wc = this.withCredentials,
-				async = wc ? true : !!async;
+				wc = this.withCredentials;
 			this.abort();
 			this._xhr.open(
 				c.connectionType = method,
 				c.location = _.getAbsolutePath(httpURLFormatter ? httpURLFormatter(url) : url),
-				async
+				wc || async === void 0 ? true : !!async
 			);
 			wc && (this._xhr.withCredentials = wc);
 		},
@@ -11768,6 +12588,7 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 			try {
 				var timeout = this.timeout | 0;
 				this._completed = false;
+				has("ti-instrumentation") && (this._requestInstrumentationTest = instrumentation.startTest("HTTP Request")),
 				args = is(args, "Object") ? lang.urlEncode(args) : args;
 				args && this._xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 				this._xhr.send(args);
@@ -11777,8 +12598,8 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 						this.abort();
 						!this._completed && this._onError("Request timed out");
 					}
-				}, timeout)));
-			} catch (ex) {console.debug(ex)}
+				}), timeout));
+			} catch (ex) {}
 		},
 
 		setRequestHeader: function(name, value) {
@@ -11836,84 +12657,884 @@ define(["Ti/_", "Ti/_/declare", "Ti/_/lang", "Ti/_/Evented", "Ti/Network", "Ti/B
 });
 
 },
-"Ti/_/Layouts/Base":function(){
-/* /titanium/Ti/_/Layouts/Base.js */
+"Ti/_/Layouts/ConstrainingHorizontal":function(){
+/* /titanium/Ti/_/Layouts/ConstrainingHorizontal.js */
 
-define(["Ti/_/css", "Ti/_/declare", "Ti/_/style", "Ti/_/dom"], function(css, declare, style, dom) {
+define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/UI", "Ti/_/lang", "Ti/_/style"], function(Base, declare, UI, lang, style) {
+	
+	var isDef = lang.isDef,
+		setStyle = style.set,
+		round = Math.round;
 
-	return declare("Ti._.Layouts.Base", null, {
+	return declare("Ti._.Layouts.ConstrainingHorizontal", Base, {
 
-		constructor: function(element) {
-			this.element = element;
-			css.add(element.domNode, css.clean(this.declaredClass));
-		},
-
-		destroy: function() {
-			css.remove(this.element.domNode, css.clean(this.declaredClass));
-		},
-		
-		verifyChild: function(child, parent) {
-			if (!child._alive || !child.domNode) {
-				console.debug("WARNING: Attempting to layout element that has been destroyed.\n\t Removing the element from the parent.\n\t The parent has a widget ID of " + parent.widgetId + ".");
-				var children = parent.children;
-				children.splice(children.indexOf(child),1);
-				return;
+		_doLayout: function(element, width, height, isWidthSize, isHeightSize) {
+			var computedSize = {width: 0, height: 0},
+				children = element._children,
+				child,
+				i = 0,
+				layoutCoefficients, 
+				widthLayoutCoefficients, heightLayoutCoefficients, sandboxWidthLayoutCoefficients, sandboxHeightLayoutCoefficients, topLayoutCoefficients, leftLayoutCoefficients, 
+				childSize,
+				measuredWidth, measuredHeight, measuredSandboxHeight, measuredSandboxWidth, measuredLeft, measuredTop,
+				pixelUnits = "px",
+				deferredPositionCalculations = [],
+				deferredTopCalculations = [],
+				runningWidth = 0,
+				remainingSpace,
+				fillCount = 0,
+				len = children.length,
+				verifyChild = this.verifyChild,
+				updateBorder = this.updateBorder,
+				measureNode = this._measureNode,
+				style;
+				
+			// Calculate size for the non-FILL children
+			for(i = 0; i < len; i++) {
+				
+				child = element._children[i];
+				if (!child._alive || !child.domNode) {
+					this.handleInvalidState(child,element);
+				} else {
+					
+					if (child._markedForLayout) {
+						((child._preLayout && child._preLayout(width, height, isWidthSize, isHeightSize)) || child._needsMeasuring) && measureNode(child, child, child._layoutCoefficients, this);
+									
+						layoutCoefficients = child._layoutCoefficients;
+						widthLayoutCoefficients = layoutCoefficients.width;
+						
+						if (widthLayoutCoefficients.x2 === 0 || isNaN(widthLayoutCoefficients.x2)) {
+							heightLayoutCoefficients = layoutCoefficients.height;
+							sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+							sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+							
+							measuredHeight = heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x2;
+							measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2 * (width - runningWidth) + widthLayoutCoefficients.x3;
+							
+							if (child._getContentSize) {
+								childSize = child._getContentSize(measuredWidth, measuredHeight);
+							} else {
+								childSize = child._layout._doLayout(
+									child, 
+									isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+									isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+									isNaN(measuredWidth), 
+									isNaN(measuredHeight));
+							}
+							isNaN(measuredWidth) && (measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth);
+							isNaN(measuredHeight) && (measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth);
+							
+							measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + measuredWidth;
+							
+							runningWidth += measuredSandboxWidth;
+							
+							child._measuredWidth = measuredWidth;
+							child._measuredHeight = measuredHeight;
+						} else {
+							fillCount++;
+						}
+					}
+				}
 			}
-			return 1;
+			
+			// Calculate size for the FILL children
+			remainingSpace = width - runningWidth;
+			runningWidth = Math.floor(remainingSpace / fillCount); // Temporary repurposing of runningHeight
+			for(i = 0; i < len; i++) {
+				
+				child = element._children[i];
+				if (child._markedForLayout) {
+									
+					layoutCoefficients = child._layoutCoefficients;
+					widthLayoutCoefficients = layoutCoefficients.width;
+					
+					if (widthLayoutCoefficients.x2 !== 0 && !isNaN(widthLayoutCoefficients.x2)) {
+						heightLayoutCoefficients = layoutCoefficients.height;
+						sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+						sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+						
+						measuredHeight = heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x2;
+						measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2 * (i < len - 1 ? runningWidth : remainingSpace - runningWidth * (fillCount - 1)) + widthLayoutCoefficients.x3;
+						
+						if (child._getContentSize) {
+							childSize = child._getContentSize(measuredWidth, measuredHeight);
+						} else {
+							childSize = child._layout._doLayout(
+								child, 
+								isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+								isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+								isNaN(measuredWidth), 
+								isNaN(measuredHeight));
+						}
+						isNaN(measuredWidth) && (measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth);
+						isNaN(measuredHeight) && (measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth);
+						child._measuredWidth = measuredWidth;
+						child._measuredHeight = measuredHeight;
+						
+						measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + measuredWidth;
+					}
+				}
+			}
+			
+			// Calculate position for the children
+			runningWidth = 0;
+			for(i = 0; i < len; i++) {
+				
+				child = element._children[i];
+				child._measuredRunningWidth = runningWidth;
+				if (child._markedForLayout) {
+					layoutCoefficients = child._layoutCoefficients;
+					sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+					topLayoutCoefficients = layoutCoefficients.top;
+					leftLayoutCoefficients = layoutCoefficients.left;
+					
+					if (isHeightSize && topLayoutCoefficients.x1 !== 0) {
+						deferredTopCalculations.push(child);
+					} else {
+						measuredHeight = child._measuredHeight;
+						
+						measuredTop = child._measuredTop = topLayoutCoefficients.x1 * height + topLayoutCoefficients.x2 * measuredHeight + topLayoutCoefficients.x3;
+						measuredSandboxHeight = child._measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + measuredHeight + (isNaN(measuredTop) ? 0 : measuredTop);
+						measuredSandboxHeight > computedSize.height && (computedSize.height = measuredSandboxHeight);
+					}
+					measuredLeft = child._measuredLeft = leftLayoutCoefficients.x1 * width + leftLayoutCoefficients.x2 + runningWidth;
+				}
+				runningWidth += child._measuredSandboxWidth;
+			}
+			computedSize.width = runningWidth;
+			
+			// Calculate the preliminary sandbox heights (missing top, since one of these heights may end up impacting all the tops)
+			len = deferredTopCalculations.length;
+			for(i = 0; i < len; i++) {
+				child = deferredTopCalculations[i];
+				sandboxHeightLayoutCoefficients = child._layoutCoefficients.sandboxHeight;
+				measuredSandboxHeight = child._measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + child._measuredHeight;
+				measuredSandboxHeight > computedSize.height && (computedSize.height = measuredSandboxHeight);
+			}
+			
+			// Second pass, if necessary, to determine the top values
+			for(i = 0; i < len; i++) {
+				child = deferredTopCalculations[i];
+				
+				topLayoutCoefficients = child._layoutCoefficients.top;
+				sandboxHeightLayoutCoefficients = child._layoutCoefficients.sandboxHeight;
+				measuredHeight = child._measuredHeight;
+				measuredSandboxHeight = child._measuredSandboxHeight;
+				
+				measuredSandboxHeight > computedSize.height && (computedSize.height = measuredSandboxHeight);
+				measuredTop = child._measuredTop = topLayoutCoefficients.x1 * computedSize.height + topLayoutCoefficients.x2 * measuredHeight + topLayoutCoefficients.x3;
+				child._measuredSandboxHeight += (isNaN(measuredTop) ? 0 : measuredTop);
+			}
+			
+			// Position the children
+			len = children.length;
+			for(i = 0; i < len; i++) {
+				child = children[i];
+				if (child._markedForLayout) {
+					UI._elementLayoutCount++;
+					child = children[i];
+					style = child.domNode.style;
+					style.zIndex = child.zIndex;
+					style.left = round(child._measuredLeft) + pixelUnits;
+					style.top = round(child._measuredTop) + pixelUnits;
+					style.width = round(child._measuredWidth - child._borderLeftWidth - child._borderRightWidth) + pixelUnits;
+					style.height = round(child._measuredHeight - child._borderTopWidth - child._borderBottomWidth) + pixelUnits;
+					child._markedForLayout = false;
+					child.fireEvent("postlayout");
+				}
+			}
+			
+			return this._computedSize = computedSize;
 		},
 		
-		_computedSize: {width: 0, height: 0}
+		_getWidth: function(node, width) {
+			
+			// Get the width or default width, depending on which one is needed
+			!isDef(width) && (width = node._defaultWidth);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (width === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getWidth(node._parent, node._parent.width) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return width;
+		},
+		
+		_getHeight: function(node, height) {
+			
+			// Get the height or default height, depending on which one is needed
+			!isDef(height) && (isDef(node.top) + isDef(node.center && node.center.y) + isDef(node.bottom) < 2) && (height = node._defaultHeight);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (height === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getHeight(node._parent, node._parent.height) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return height;
+		},
+		
+		_isDependentOnParent: function(node){
+			var layoutCoefficients = node._layoutCoefficients;
+			return (!isNaN(layoutCoefficients.width.x1) && layoutCoefficients.width.x1 !== 0) ||
+				(!isNaN(layoutCoefficients.width.x2) && layoutCoefficients.width.x2 !== 0) || // width
+				(!isNaN(layoutCoefficients.height.x1) && layoutCoefficients.height.x1 !== 0) || // height
+				layoutCoefficients.sandboxWidth.x1 !== 0 || // sandbox width
+				layoutCoefficients.sandboxHeight.x1 !== 0 || // sandbox height
+				layoutCoefficients.left.x1 !== 0 || // left
+				layoutCoefficients.top.x1 !== 0; // top
+		},
+		
+		_doAnimationLayout: function(node, animationCoefficients) {
+			
+			var parentWidth = node._parent._measuredWidth,
+				parentHeight = node._parent._measuredHeight,
+				nodeWidth = node._measuredWidth,
+				nodeHeight = node._measuredHeight,
+				runningWidth = node._measuredRunningWidth,
+				height = animationCoefficients.height.x1 * parentHeight + animationCoefficients.height.x2;
+			
+			return {
+				width: animationCoefficients.width.x1 * parentWidth + animationCoefficients.width.x2 * (parentWidth - runningWidth) + animationCoefficients.width.x3,
+				height: height,
+				left: animationCoefficients.left.x1 * parentWidth + animationCoefficients.left.x2 + runningWidth,
+				top: animationCoefficients.top.x1 * parentHeight + animationCoefficients.top.x2 * height + animationCoefficients.top.x3
+			}
+		},
+		
+		_measureNode: function(node, layoutProperties, layoutCoefficients, self) {
+			
+			node._needsMeasuring = false;
+			
+			// Pre-processing
+			var getValueType = self.getValueType,
+				computeValue = self.computeValue,
+			
+				width = self._getWidth(node, layoutProperties.width),
+				widthType = getValueType(width),
+				widthValue = computeValue(width, widthType),
+				
+				height = self._getHeight(node, layoutProperties.height),
+				heightType = getValueType(height),
+				heightValue = computeValue(height, heightType),
+				
+				left = layoutProperties.left,
+				leftType = getValueType(left),
+				leftValue = computeValue(left, leftType),
+				
+				right = layoutProperties.right,
+				rightType = getValueType(right),
+				rightValue = computeValue(right, rightType),
+				
+				top = layoutProperties.top,
+				topType = getValueType(top),
+				topValue = computeValue(top, topType),
+				
+				centerY = layoutProperties.center && layoutProperties.center.y,
+				centerYType = getValueType(centerY),
+				centerYValue = computeValue(centerY, centerYType),
+				
+				bottom = layoutProperties.bottom,
+				bottomType = getValueType(bottom),
+				bottomValue = computeValue(bottom, bottomType),
+				
+				x1, x2, x3,
+				
+				widthLayoutCoefficients = layoutCoefficients.width,
+				heightLayoutCoefficients = layoutCoefficients.height,
+				sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth,
+				sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight,
+				leftLayoutCoefficients = layoutCoefficients.left,
+				topLayoutCoefficients = layoutCoefficients.top;
+			
+			// Height rule evaluation
+			x1 = x2 = 0;
+			if (heightType === UI.SIZE) {
+				x1 = x2 = NaN;
+			} else if (heightType === UI.FILL) {
+				x1 = 1;
+				if (topType === "%") {
+					x1 -= topValue;
+				} else if (topType === "#") {
+					x2 = -topValue;
+				} else if (bottomType === "%") {
+					x1 -= bottomValue;
+				} else if (bottomType === "#") {
+					x2 = -bottomValue;
+				}
+			} else if (heightType === "%") {
+				x1 = heightValue;
+			} else if (heightType === "#") {
+				x2 = heightValue;
+			} else if (topType === "%") {
+				if (centerYType === "%") {
+					x1 = 2 * (centerYValue - topValue);
+				} else if (centerYType === "#") {
+					x1 = -2 * topValue;
+					x2 = 2 * centerYValue;
+				} else if (bottomType === "%") {
+					x1 = 1 - topValue - bottomValue;
+				} else if (bottomType === "#") {
+					x1 = 1 - topValue;
+					x2 = -bottomValue;
+				}
+			} else if (topType === "#") {
+				if (centerYType === "%") {
+					x1 = 2 * centerYValue;
+					x2 = -2 * topValue;
+				} else if (centerYType === "#") {
+					x2 = 2 * (centerYValue - topValue);
+				} else if (bottomType === "%") {
+					x1 = 1 - bottomValue;
+					x2 = -topValue;
+				} else if (bottomType === "#") {
+					x1 = 1;
+					x2 = -bottomValue - topValue;
+				}
+			} else if (centerYType === "%") {
+				if (bottomType === "%") {
+					x1 = 2 * (bottomValue - centerYValue);
+				} else if (bottomType === "#") {
+					x1 = -2 * centerYValue;
+					x2 = 2 * bottomValue;
+				}
+			} else if (centerYType === "#") {
+				if (bottomType === "%") {
+					x1 = 2 * bottomValue;
+					x2 = -2 * centerYValue;
+				} else if (bottomType === "#") {
+					x2 = 2 * (bottomValue - centerYValue);
+				}
+			}
+			heightLayoutCoefficients.x1 = x1;
+			heightLayoutCoefficients.x2 = x2;
+			
+			// Sandbox height rule evaluation
+			sandboxHeightLayoutCoefficients.x1 = bottomType === "%" ? bottomValue : 0;
+			sandboxHeightLayoutCoefficients.x2 = bottomType === "#" ? bottomValue : 0;
+			
+			// Width rule calculation
+			x1 = x2 = x3 = 0;
+			if (widthType === UI.SIZE) {
+				x1 = x2 = x3 = NaN;
+			} else if (widthType === UI.FILL) {
+				x2 = 1;
+				leftType === "%" && (x1 = -leftValue);
+				leftType === "#" && (x3 = -leftValue);
+				rightType === "%" && (x1 = -rightValue);
+				rightType === "#" && (x3 = -rightValue);
+			} else if (widthType === "%") {
+				x1 = widthValue;
+			} else if (widthType === "#") {
+				x3 = widthValue;
+			}
+			widthLayoutCoefficients.x1 = x1;
+			widthLayoutCoefficients.x2 = x2;
+			widthLayoutCoefficients.x3 = x3;
+			
+			// Sandbox width rule calculation
+			x1 = x2 = 0;
+			leftType === "%" && (x1 = leftValue);
+			leftType === "#" && (x2 = leftValue);
+			rightType === "%" && (x1 += rightValue);
+			rightType === "#" && (x2 += rightValue);
+			sandboxWidthLayoutCoefficients.x1 = x1;
+			sandboxWidthLayoutCoefficients.x2 = x2;
+			
+			// Top rule calculation
+			x1 = x2 = x3 = 0;
+			if (topType === "%") {
+				x1 = topValue;
+			} else if(topType === "#") {
+				x3 = topValue;
+			} else if (centerYType === "%") {
+				x1 = centerYValue;
+				x2 = -0.5;
+			} else if (centerYType === "#") {
+				x2 = -0.5;
+				x3 = centerYValue;
+			} else if (bottomType === "%") {
+				x1 = 1 - bottomValue;
+				x2 = -1;
+			} else if (bottomType === "#") {
+				x1 = 1;
+				x2 = -1;
+				x3 = -bottomValue;
+			} else { 
+				switch(self._defaultVerticalAlignment) {
+					case "center": 
+						x1 = 0.5;
+						x2 = -0.5;
+						break;
+					case "end":
+						x1 = 1;
+						x2 = -1;
+				}
+			}
+			topLayoutCoefficients.x1 = x1;
+			topLayoutCoefficients.x2 = x2;
+			topLayoutCoefficients.x3 = x3;
+			
+			// Left rule calculation
+			leftLayoutCoefficients.x1 = leftType === "%" ? leftValue : 0;
+			leftLayoutCoefficients.x2 = leftType === "#" ? leftValue : 0;
+		},
+		
+		_defaultHorizontalAlignment: "start",
+		
+		_defaultVerticalAlignment: "center"
 
 	});
 
 });
+
 },
 "Ti/_/Layouts/Composite":function(){
 /* /titanium/Ti/_/Layouts/Composite.js */
 
-define(["Ti/_/Layouts/Base", "Ti/_/declare"], function(Base, declare) {
+define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/UI", "Ti/_/lang"], function(Base, declare, UI, lang) {
+	
+	var isDef = lang.isDef,
+		pixelUnits = "px",
+		round = Math.round;
 
 	return declare("Ti._.Layouts.Composite", Base, {
-
+		
 		_doLayout: function(element, width, height, isWidthSize, isHeightSize) {
-			var computedSize = this._computedSize = {width: 0, height: 0},
-				children = element.children;
-			for(var i = 0; i < children.length; i++) {
+			var computedSize = {width: 0, height: 0},
+				children = element._children,
+				child,
+				i = 0,
+				layoutCoefficients, 
+				widthLayoutCoefficients, heightLayoutCoefficients, sandboxWidthLayoutCoefficients, sandboxHeightLayoutCoefficients, topLayoutCoefficients, leftLayoutCoefficients, 
+				minWidthLayoutCoefficients, minHeightLayoutCoefficients,
+				childSize,
+				measuredWidth, measuredHeight, measuredSandboxHeight, measuredSandboxWidth, measuredLeft, measuredTop,
+				deferredLeftCalculations = [],
+				deferredTopCalculations = [],
+				len = children.length,
+				verifyChild = this.verifyChild,
+				updateBorder = this.updateBorder,
+				measureNode = this._measureNode,
+				style;
+			
+			// Calculate size and position for the children
+			for(i = 0; i < len; i++) {
 				
-				// Layout the child
-				var child = element.children[i];
-				if (this.verifyChild(child,element)) {
-					if (child._markedForLayout) {
-						child._doLayout({
-						 	origin: {
-						 		x: 0,
-						 		y: 0
-						 	},
-						 	isParentSize: {
-						 		width: isWidthSize,
-						 		height: isHeightSize
-						 	},
-						 	boundingSize: {
-						 		width: width,
-						 		height: height
-						 	},
-						 	alignment: {
-						 		horizontal: this._defaultHorizontalAlignment,
-						 		vertical: this._defaultVerticalAlignment
-						 	},
-						 	positionElement: true,
-						 	layoutChildren: true
-					 	});
-					}
+				child = element._children[i];
+				if (!child._alive || !child.domNode) {
+					this.handleInvalidState(child,element);
+				} else {
 					
-					// Update the size of the component
-					var rightMostEdge = child._measuredWidth + child._measuredLeft + child._measuredBorderSize.left + child._measuredBorderSize.right + child._measuredRightPadding;
-					var bottomMostEdge = child._measuredHeight + child._measuredTop + child._measuredBorderSize.top + child._measuredBorderSize.bottom + child._measuredBottomPadding;
-					rightMostEdge > computedSize.width && (computedSize.width = rightMostEdge);
-					bottomMostEdge > computedSize.height && (computedSize.height = bottomMostEdge);
+					if (child._markedForLayout) {
+						((child._preLayout && child._preLayout(width, height, isWidthSize, isHeightSize)) || child._needsMeasuring) && measureNode(child, child, child._layoutCoefficients, this);
+						
+						layoutCoefficients = child._layoutCoefficients;
+						widthLayoutCoefficients = layoutCoefficients.width;
+						minWidthLayoutCoefficients = layoutCoefficients.minWidth;
+						heightLayoutCoefficients = layoutCoefficients.height;
+						minHeightLayoutCoefficients = layoutCoefficients.minHeight;
+						sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+						sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+						leftLayoutCoefficients = layoutCoefficients.left;
+						topLayoutCoefficients = layoutCoefficients.top;
+						
+						measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2;
+						minWidthLayoutCoefficients.x1 !== void 0 && (measuredWidth = Math.max(measuredWidth, 
+							minWidthLayoutCoefficients.x1 * width + minWidthLayoutCoefficients.x2));
+						
+						measuredHeight = heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x2;
+						minHeightLayoutCoefficients.x1 !== void 0 && (measuredHeight = Math.max(measuredHeight, 
+							minHeightLayoutCoefficients.x1 * height + minHeightLayoutCoefficients.x2));
+						
+						if (child._getContentSize) {
+							childSize = child._getContentSize(measuredWidth, measuredHeight);
+						} else {
+							childSize = child._layout._doLayout(
+								child, 
+								isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+								isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+								isNaN(measuredWidth), 
+								isNaN(measuredHeight));
+						}
+						
+						if (isNaN(measuredWidth)) {
+							measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth;
+							minWidthLayoutCoefficients.x1 !== void 0 && (measuredWidth = Math.max(measuredWidth, 
+								minWidthLayoutCoefficients.x1 * width + minWidthLayoutCoefficients.x2));
+						}
+						if (isNaN(measuredHeight)) {
+							measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth;
+							minHeightLayoutCoefficients.x1 !== void 0 && (measuredHeight = Math.max(measuredHeight, 
+								minHeightLayoutCoefficients.x1 * height + minHeightLayoutCoefficients.x2));
+						}
+						
+						if (isWidthSize && leftLayoutCoefficients.x1 !== 0) {
+							deferredLeftCalculations.push(child);
+						} else {
+							measuredLeft = leftLayoutCoefficients.x1 * width + leftLayoutCoefficients.x2 * measuredWidth + leftLayoutCoefficients.x3;
+						}
+						if (isHeightSize && topLayoutCoefficients.x1 !== 0) {
+							deferredTopCalculations.push(child);
+						} else {
+							measuredTop = topLayoutCoefficients.x1 * height + topLayoutCoefficients.x2 * measuredHeight + topLayoutCoefficients.x3;
+						}
+						
+						child._measuredSandboxWidth = measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * height + sandboxWidthLayoutCoefficients.x2 + measuredWidth + (isNaN(measuredLeft) ? 0 : measuredLeft);
+						child._measuredSandboxHeight = measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + measuredHeight + (isNaN(measuredTop) ? 0 : measuredTop);
+					
+						// Update the size of the component
+						measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+						measuredSandboxHeight > computedSize.height && (computedSize.height = measuredSandboxHeight);
+						
+						child._measuredWidth = measuredWidth;
+						child._measuredHeight = measuredHeight;
+						child._measuredLeft = measuredLeft;
+						child._measuredTop = measuredTop;
+					}
 				}
 			}
-			return computedSize;
+			
+			// Second pass, if necessary, to determine the left/top values
+			len = deferredLeftCalculations.length;
+			for(i = 0; i < len; i++) {
+				child = deferredLeftCalculations[i];
+				leftLayoutCoefficients = child._layoutCoefficients.left;
+				sandboxWidthLayoutCoefficients = child._layoutCoefficients.sandboxWidth;
+				child._measuredLeft = measuredLeft = leftLayoutCoefficients.x1 * computedSize.width + leftLayoutCoefficients.x2 * measuredWidth + leftLayoutCoefficients.x3;
+				child._measuredSandboxWidth = measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * height + sandboxWidthLayoutCoefficients.x2 + child._measuredWidth + measuredLeft;
+				
+				// Update the size of the component
+				measuredSandboxWidth = child._measuredSandboxWidth;
+				measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+			}
+			len = deferredTopCalculations.length;
+			for(i = 0; i < len; i++) {
+				child = deferredTopCalculations[i];
+				topLayoutCoefficients = child._layoutCoefficients.top;
+				sandboxHeightLayoutCoefficients = child._layoutCoefficients.sandboxHeight;
+				child._measuredTop = measuredTop = topLayoutCoefficients.x1 * computedSize.height + topLayoutCoefficients.x2 * measuredHeight + topLayoutCoefficients.x3;
+				child._measuredSandboxHeight = measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + child._measuredHeight + measuredTop;
+				
+				// Update the size of the component
+				measuredSandboxHeight = child._measuredSandboxHeight;
+				measuredSandboxHeight > computedSize.height && (computedSize.height = measuredSandboxHeight);
+			}
+			
+			// Position the children
+			len = children.length;
+			for(i = 0; i < len; i++) {
+				child = children[i];
+				if (child._markedForLayout) {
+					UI._elementLayoutCount++;
+					style = child.domNode.style;
+					style.zIndex = child.zIndex;
+					style.left = round(child._measuredLeft) + pixelUnits;
+					style.top = round(child._measuredTop) + pixelUnits;
+					style.width = round(child._measuredWidth - child._borderLeftWidth - child._borderRightWidth) + pixelUnits;
+					style.height = round(child._measuredHeight - child._borderTopWidth - child._borderBottomWidth) + pixelUnits;
+					child._markedForLayout = false;
+					child.fireEvent("postlayout");
+				}
+			}
+			
+			return this._computedSize = computedSize;
+		},
+		
+		_getWidth: function(node, width) {
+			
+			// Get the width or default width, depending on which one is needed
+			!isDef(width) && (isDef(node.left) + isDef(node.center && node.center.x) + isDef(node.right) < 2) && (width = node._defaultWidth);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (width === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getWidth(node._parent, node._parent.width) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return width;
+		},
+		
+		_getHeight: function(node, height) {
+			
+			// Get the height or default height, depending on which one is needed
+			!isDef(height) && (isDef(node.top) + isDef(node.center && node.center.y) + isDef(node.bottom) < 2) && (height = node._defaultHeight);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (height === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getHeight(node._parent, node._parent.height) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return height;
+		},
+		
+		_isDependentOnParent: function(node){
+			var layoutCoefficients = node._layoutCoefficients;
+			return (!isNaN(layoutCoefficients.width.x1) && layoutCoefficients.width.x1 !== 0) || // width
+				(!isNaN(layoutCoefficients.height.x1) && layoutCoefficients.height.x1 !== 0) || // height
+				layoutCoefficients.left.x1 !== 0 || // left
+				layoutCoefficients.top.x1 !== 0; // top
+		},
+		
+		_doAnimationLayout: function(node, animationCoefficients) {
+			
+			var parentWidth = node._parent._measuredWidth,
+				parentHeight = node._parent._measuredHeight,
+				nodeWidth = node._measuredWidth,
+				nodeHeight = node._measuredHeight,
+				width = animationCoefficients.width.x1 * parentWidth + animationCoefficients.width.x2,
+				height = animationCoefficients.height.x1 * parentHeight + animationCoefficients.height.x2;
+			
+			return {
+				width: width,
+				height: height,
+				left: animationCoefficients.left.x1 * parentWidth + animationCoefficients.left.x2 * width + animationCoefficients.left.x3,
+				top: animationCoefficients.top.x1 * parentHeight + animationCoefficients.top.x2 * height + animationCoefficients.top.x3
+			}
+		},
+		
+		_measureNode: function(node, layoutProperties, layoutCoefficients, self) {
+			
+			node._needsMeasuring = false;
+			
+			// Pre-processing
+			var getValueType = self.getValueType,
+				computeValue = self.computeValue,
+			
+				width = self._getWidth(node, layoutProperties.width),
+				widthType = getValueType(width),
+				widthValue = computeValue(width, widthType),
+			
+				minWidth = layoutProperties._minWidth,
+				minWidthType = getValueType(minWidth),
+				minWidthValue = computeValue(minWidth, minWidthType),
+			
+				height = self._getHeight(node, layoutProperties.height),
+				heightType = getValueType(height),
+				heightValue = computeValue(height, heightType),
+			
+				minHeight = layoutProperties._minHeight,
+				minHeightType = getValueType(minHeight),
+				minHeightValue = computeValue(minHeight, minHeightType),
+			
+				left = layoutProperties.left,
+				leftType = getValueType(left),
+				leftValue = computeValue(left, leftType),
+				
+				centerX = layoutProperties.center && layoutProperties.center.x,
+				centerXType = getValueType(centerX),
+				centerXValue = computeValue(centerX, centerXType),
+				
+				right = layoutProperties.right,
+				rightType = getValueType(right),
+				rightValue = computeValue(right, rightType),
+				
+				top = layoutProperties.top,
+				topType = getValueType(top),
+				topValue = computeValue(top, topType),
+				
+				centerY = layoutProperties.center && layoutProperties.center.y,
+				centerYType = getValueType(centerY),
+				centerYValue = computeValue(centerY, centerYType),
+				
+				bottom = layoutProperties.bottom,
+				bottomType = getValueType(bottom),
+				bottomValue = computeValue(bottom, bottomType),
+				
+				x1, x2, x3,
+				
+				sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth,
+				sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight,
+			
+				// Width/height rule evaluation
+				paramsSet = [
+					[widthType, widthValue, leftType, leftValue, centerXType, centerXValue, rightType, rightValue],
+					[heightType, heightValue, topType, topValue, centerYType, centerYValue, bottomType, bottomValue]
+				],
+				params, sizeType, sizeValue, startType, startValue, centerType, centerValue, endType, endValue,
+				i = 0,
+				type;
+			for (; i < 2; i++) {
+				
+				params = paramsSet[i];
+				sizeType = params[0];
+				sizeValue = params[1];
+				startType = params[2];
+				startValue = params[3];
+				centerType = params[4];
+				centerValue = params[5];
+				endType = params[6];
+				endValue = params[7];
+				
+				x1 = x2 = 0;
+				if (sizeType === UI.SIZE) {
+					x1 = x2 = NaN;
+				} else if (sizeType === UI.FILL) {
+					x1 = 1;
+					if (startType === "%") {
+						x1 -= startValue;
+					} else if (startType === "#") {
+						x2 = -startValue;
+					} else if (endType === "%") {
+						x1 -= endValue;
+					} else if (endType === "#") {
+						x2 = -endValue;
+					}
+				} else if (sizeType === "%") {
+					x1 = sizeValue;
+				} else if (sizeType === "#") {
+					x2 = sizeValue;
+				} else if (startType === "%") {
+					if (centerType === "%") {
+						x1 = 2 * (centerValue - startValue);
+					} else if (centerType === "#") {
+						x1 = -2 * startValue;
+						x2 = 2 * centerValue;
+					} else if (endType === "%") {
+						x1 = 1 - startValue - endValue;
+					} else if (endType === "#") {
+						x1 = 1 - startValue;
+						x2 = -endValue;
+					}
+				} else if (startType === "#") {
+					if (centerType === "%") {
+						x1 = 2 * centerValue;
+						x2 = -2 * startValue;
+					} else if (centerType === "#") {
+						x2 = 2 * (centerValue - startValue);
+					} else if (endType === "%") {
+						x1 = 1 - endValue;
+						x2 = -startValue;
+					} else if (endType === "#") {
+						x1 = 1;
+						x2 = -endValue - startValue;
+					}
+				} else if (centerType === "%") {
+					if (endType === "%") {
+						x1 = 2 * (endValue - centerValue);
+					} else if (endType === "#") {
+						x1 = -2 * centerValue;
+						x2 = 2 * endValue;
+					}
+				} else if (centerType === "#") {
+					if (endType === "%") {
+						x1 = 2 * endValue;
+						x2 = -2 * centerValue;
+					} else if (endType === "#") {
+						x2 = 2 * (endValue - centerValue);
+					}
+				}
+				layoutCoefficients[type = i === 0 ? "width" : "height"].x1 = x1;
+				layoutCoefficients[type].x2 = x2;
+			}
+			
+			// Min width/height rule evaluation
+			paramsSet = {
+				minWidth: [minWidthType, minWidthValue, leftType, leftValue, centerXType, centerXValue, rightType, rightValue],
+				minHeight: [minHeightType, minHeightValue, topType, topValue, centerYType, centerYValue, bottomType, bottomValue]
+			};
+			for (i in paramsSet) {
+				
+				params = paramsSet[i];
+				sizeType = params[0];
+				sizeValue = params[1];
+				startType = params[2];
+				startValue = params[3];
+				centerType = params[4];
+				centerValue = params[5];
+				endType = params[6];
+				endValue = params[7];
+				
+				x1 = x2 = x3 = 0;
+				if (sizeType === UI.SIZE) {
+					x1 = x2 = NaN;
+				} else if (sizeType === UI.FILL) {
+					x1 = 1;
+					if (startType === "%") {
+						x1 -= startValue;
+					} else if (startType === "#") {
+						x2 = -startValue;
+					} else if (endType === "%") {
+						x1 -= endValue;
+					} else if (endType === "#") {
+						x2 = -endValue;
+					}
+				} else if (sizeType === "%") {
+					x1 = sizeValue;
+				} else if (sizeType === "#") {
+					x2 = sizeValue;
+				} else {
+					x1 = x2 = x3 = void 0;
+				}
+				layoutCoefficients[i].x1 = x1;
+				layoutCoefficients[i].x2 = x2;
+				layoutCoefficients[i].x3 = x3;
+			}
+			
+			// Left/top rule evaluation
+			paramsSet = [
+				[leftType, leftValue, centerXType, centerXValue, rightType, rightValue],
+				[topType, topValue, centerYType, centerYValue, bottomType, bottomValue]
+			];
+			for (i = 0; i < 2; i++) {
+				
+				params = paramsSet[i];
+				startType = params[0];
+				startValue = params[1];
+				centerType = params[2];
+				centerValue = params[3];
+				endType = params[4];
+				endValue = params[5];
+					
+				x1 = x2 = x3 = 0;
+				if (startType === "%") {
+					x1 = startValue;
+				} else if(startType === "#") {
+					x3 = startValue;
+				} else if (centerType === "%") {
+					x1 = centerValue;
+					x2 = -0.5;
+				} else if (centerType === "#") {
+					x2 = -0.5;
+					x3 = centerValue;
+				} else if (endType === "%") {
+					x1 = 1 - endValue;
+					x2 = -1;
+				} else if (endType === "#") {
+					x1 = 1;
+					x2 = -1;
+					x3 = -endValue;
+				} else { 
+					switch(i === "left" ? self._defaultHorizontalAlignment : self._defaultVerticalAlignment) {
+						case "center": 
+							x1 = 0.5;
+							x2 = -0.5;
+							break;
+						case "end":
+							x1 = 1;
+							x2 = -1;
+					}
+				}
+				layoutCoefficients[type = i === 0 ? "left" : "top"].x1 = x1;
+				layoutCoefficients[type].x2 = x2;
+				layoutCoefficients[type].x3 = x3;
+			}
+			
+			// Sandbox width/height rule evaluation
+			sandboxWidthLayoutCoefficients.x1 = rightType === "%" ? rightValue : 0;
+			sandboxWidthLayoutCoefficients.x2 = rightType === "#" ? rightValue : 0;
+			sandboxHeightLayoutCoefficients.x1 = bottomType === "%" ? bottomValue : 0;
+			sandboxHeightLayoutCoefficients.x2 = bottomType === "#" ? bottomValue : 0;
 		},
 		
 		_defaultHorizontalAlignment: "center",
@@ -11928,47 +13549,56 @@ define(["Ti/_/Layouts/Base", "Ti/_/declare"], function(Base, declare) {
 "Ti/UI/TableViewRow":function(){
 /* /titanium/Ti/UI/TableViewRow.js */
 
-define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/UI"],
-	function(declare, lang, View, dom, css, style, UI) {
+define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/UI", "Ti/_/Layouts/ConstrainingHorizontal"],
+	function(declare, lang, View, dom, css, style, UI, ConstrainingHorizontal) {
 
 	var setStyle = style.set,
 		isDef = lang.isDef,
-		imagePrefix = "themes/" + require.config.ti.theme + "/UI/TableViewRow/"
+		imagePrefix = "themes/" + require.config.ti.theme + "/UI/TableViewRow/",
 		checkImage = imagePrefix + "check.png",
 		childImage = imagePrefix + "child.png",
 		detailImage = imagePrefix + "detail.png";
 
 	return declare("Ti.UI.TableViewRow", View, {
-		
+
 		// The number of pixels 1 indention equals
 		_indentionScale: 10,
-		
+
 		constructor: function(args) {
-			this.add(this._defaultControl = UI.createView({
-				width: UI.INHERIT,
-				height: UI.INHERIT,
-				layout: "horizontal"
-			}));
-			this._defaultControl._layout._defaultVerticalAlignment = "center";
-			
-			this._defaultControl.add(this._leftImageView = UI.createImageView({
+
+			this._layout = new ConstrainingHorizontal(this);
+
+			this._add(this._leftImageView = UI.createImageView({
 				width: UI.SIZE,
 				height: UI.SIZE
 			})); 
 
-			this._defaultControl.add(this._titleLabel = UI.createLabel({
+			var centerContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.INHERIT
+			});
+			this._add(centerContainer);
+
+			centerContainer._add(this._titleLabel = UI.createLabel({
 				width: UI.INHERIT,
 				height: UI.INHERIT,
 				wordWrap: false
 			}));
 
-			this._defaultControl.add(this._rightImageView = UI.createImageView({
-				width: UI.SIZE, 
+			centerContainer._add(this._contentContainer = UI.createView({
+				width: UI.INHERIT,
+				height: UI.INHERIT
+			}));
+
+			this._add(this._rightImageView = UI.createImageView({
+				right: 0,
+				width: UI.SIZE,
 				height: UI.SIZE
 			}));
+
+			// Force single tap to be processed.
+			this.addEventListener("singletap");
 		},
-		
-		_usingDefaultControl: 1,
 
 		_defaultWidth: UI.INHERIT,
 
@@ -11992,6 +13622,16 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_
 				this._titleLabel.color = this.color;
 			}
 			View.prototype._doBackground.apply(this,arguments);
+		},
+
+		add: function(view) {
+			this._contentContainer._add(view);
+			this._publish(view);
+		},
+
+		remove: function(view) {
+			this._contentContainer._remove(view);
+			this._unpublish(view);
 		},
 
 		properties: {
@@ -12033,6 +13673,11 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_
 				},
 				value: 0
 			},
+			layout: {
+				set: function(value) {
+					this._contentContainer.layout = value;
+				}
+			},
 			leftImage: {
 				set: function(value) {
 					this._leftImageView.image = value;
@@ -12071,118 +13716,92 @@ define(["Ti/_/declare", "Ti/_/lang", "Ti/UI/View", "Ti/_/dom", "Ti/_/css", "Ti/_
 "Ti/UI/Button":function(){
 /* /titanium/Ti/UI/Button.js */
 
-define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/_/lang", "Ti/Locale", "Ti/UI"],
-	function(declare, FontWidget, dom, css, style, lang, Locale, UI) {
+define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/_/lang", "Ti/Locale", "Ti/UI"],
+	function(declare, Widget, dom, css, style, lang, Locale, UI) {
 
-	var setStyle = style.set,
+	var on = require.on,
+		setStyle = style.set,
 		postDoBackground = {
-			post: "_updateLook"
+			post: function() {
+				if (this.backgroundColor || this.backgroundDisabledColor || this.backgroundDisabledImage || this.backgroundFocusedColor || 
+					this.backgroundFocusedImage || this.backgroundImage || this.backgroundSelectedColor || this.backgroundSelectedImage) {
+					this._clearDefaultLook();
+				} else {
+					this._setDefaultLook();
+				}
+				this._doBackground();
+			}
 		},
 		titlePost = {
-			post: "_updateTitle"
+			post: function() {
+				this._buttonTitle.text = Locale._getString(this.titleid, this.title);
+				this._hasSizeDimensions() && this._triggerLayout();
+			}
 		};
 
-	return declare("Ti.UI.Button", FontWidget, {
+	return declare("Ti.UI.Button", Widget, {
 
 		constructor: function() {
-			this._contentContainer = dom.create("div", {
-				className: "TiUIButtonContentContainer",
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxOrient: "horizontal",
-					boxPack: "center",
-					boxAlign: "center",
-					pointerEvents: "none",
-					width: "100%",
-					height: "100%"
-				}
-			}, this.domNode);
+			var contentContainer = this._contentContainer = UI.createView({
+					width: UI.INHERIT,
+					height: UI.INHERIT,
+					layout: UI._LAYOUT_CONSTRAINING_HORIZONTAL,
+					borderColor: "transparent"
+				}),
+				node = this.domNode;
 
-			this._buttonImage = dom.create("img", {
-				className: "TiUIButtonImage",
-				style: {
-					pointerEvents: "none"
-				}
-			}, this._contentContainer);
+			this._add(contentContainer);
 
-			this._buttonTitle = dom.create("div", {
-				className: "TiUIButtonTitle",
-				style: {
-					whiteSpace: "nowrap",
-					pointerEvents: "none",
-					userSelect: "none"
-				}
-			}, this._contentContainer);
-
-			this._addStyleableDomNode(this._buttonTitle);
-			
-			this._setDefaultLook();
-			
-			this.addEventListener("touchstart",function(){
-				if (this.selectedColor) {
-					setStyle(this._buttonTitle,"color",this.selectedColor);
-				}
-			});
-			this.addEventListener("touchend",function(){
-				if (this.selectedColor) {
-					setStyle(this._buttonTitle,"color",this.color || "black");
-				}
-			});
-			this.domNode.addEventListener("mouseout",lang.hitch(this,function(){
-				if (this.selectedColor) {
-					setStyle(this._buttonTitle,"color",this.color || "black");
-				}
+			contentContainer._add(this._buttonImage = UI.createImageView());
+			contentContainer._add(this._buttonTitle = UI.createLabel({
+				textAlign: UI.TEXT_ALIGNMENT_CENTER,
+				verticalAlign: UI.TEXT_VERTICAL_ALIGNMENT_CENTER,
+				width: UI.INHERIT,
+				height: UI.INHERIT
 			}));
+
+			this._setDefaultLook();
+
+			on(this, "touchstart", this, function() {
+				css.remove(node, "TiUIElementGradient");
+				css.add(node, "TiUIElementGradientActive");
+				this.selectedColor && (this._buttonTitle.color = this.selectedColor);
+			});
+			on(this, "touchend", this, function() {
+				css.remove(node, "TiUIElementGradientActive");
+				css.add(node, "TiUIElementGradient");
+				this.selectedColor && (this._buttonTitle.color = this.color || "#000");
+			});
+			on(node, "mouseout", this, function() {
+				this.selectedColor && (this._buttonTitle.color = this.color || "#000");
+			});
 		},
 
 		_defaultWidth: UI.SIZE,
 
 		_defaultHeight: UI.SIZE,
 		
-		_updateLook: function() {
-			if (this.backgroundColor || this.backgroundDisabledColor || this.backgroundDisabledImage || this.backgroundFocusedColor || 
-				this.backgroundFocusedImage || this.backgroundImage || this.backgroundSelectedColor || this.backgroundSelectedImage) {
-				this._clearDefaultLook();
-			} else {
-				this._setDefaultLook();
-			}
-			this._doBackground();
-		},
-		
 		_setDefaultLook: function() {
 			if (!this._hasDefaultLook) {
 				this._hasDefaultLook = true;
+				this._previousBorderWidth = this.borderWidth;
+				this._previousBorderColor = this.borderColor;
 				css.add(this.domNode, "TiUIElementGradient");
 				css.add(this.domNode, "TiUIButtonDefault");
+				this._contentContainer.borderWidth = 6;
+				this._getBorderFromCSS();
 			}
 		},
 		
 		_clearDefaultLook: function() {
 			if (this._hasDefaultLook) {
 				this._hasDefaultLook = false;
+				this.borderWidth = this._previousBorderWidth;
+				this.borderColor = this._previousBorderColor;
 				css.remove(this.domNode, "TiUIElementGradient");
 				css.remove(this.domNode, "TiUIButtonDefault");
+				this._contentContainer.borderWidth = 0;
 			}
-		},
-		
-		_getContentSize: function(width, height) {
-			return {
-				width: this._buttonImage.width + this._measureText(this.title, this._buttonTitle).width,
-				height: Math.max(this._buttonImage.height, this._measureText(this.title, this._buttonTitle).height)
-			};
-		},
-
-		_setTouchEnabled: function(value) {
-			FontWidget.prototype._setTouchEnabled.apply(this, arguments);
-			var cssVal = value ? "auto" : "none";
-			setStyle(this._contentContainer, "pointerEvents", cssVal);
-			setStyle(this._buttonImage, "pointerEvents", cssVal);
-			setStyle(this._buttonTitle, "pointerEvents", cssVal);
-		},
-
-		_updateTitle: function() {
-			this._buttonTitle.innerHTML = Locale._getString(this.titleid, this.title);
-			this._hasSizeDimensions() && this._triggerLayout();
 		},
 
 		properties: {
@@ -12226,28 +13845,22 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			
 			image: {
 				set: function(value) {
-					require.on(this._buttonImage, "load", lang.hitch(this, function () {
-						this._hasSizeDimensions() && this._triggerLayout();
-					}));
-					this._buttonImage.src = value;
+					this._buttonImage.image = value;
 					return value;
 				}
 			},
 			selectedColor: void 0,
 			textAlign: {
 				set: function(value) {
-					setStyle(this._contentContainer, "boxPack", value === UI.TEXT_ALIGNMENT_LEFT ? "start" : value === UI.TEXT_ALIGNMENT_RIGHT ? "end" : "center");
-					return value;
+					return this._buttonTitle.textAlign = value;
 				}
 			},
 			title: titlePost,
 			titleid: titlePost,
 			verticalAlign: {
 				set: function(value) {
-					setStyle(this._contentContainer, "boxAlign", value === UI.TEXT_VERTICAL_ALIGNMENT_TOP ? "start" : value === UI.TEXT_VERTICAL_ALIGNMENT_BOTTOM ? "end" : "center");
-					return value;
-				},
-				value: UI.TEXT_VERTICAL_ALIGNMENT_CENTER
+					return this._buttonTitle.verticalAlign = value;
+				}
 			}
 		}
 
@@ -12260,44 +13873,58 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 
 define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
 
+	// This is the amount of space the finger is allowed drift until the gesture is no longer considered a tap
+	var driftThreshold = 25;
+
 	return declare("Ti._.Gestures.SingleTap", GestureRecognizer, {
-		
+
 		name: "singletap",
-		
-		_touchStartLocation: null,
-		
-		// This is the amount of space the finger is allowed drift until the gesture is no longer considered a tap
-		_driftThreshold: 25,
-		
+
+		constructor: function(type) {
+			this._type = type;
+		},
+
+		withinThreshold: function(x, y) {
+			var start = this._touchStartLocation;
+			return start && Math.abs(start.x - x) < driftThreshold && Math.abs(start.y - y) < driftThreshold;
+		},
+
 		processTouchStartEvent: function(e, element){
-			if (e.touches.length == 1 && e.changedTouches.length == 1) {
+			var changed = e.changedTouches;
+			if (e.touches.length == 1 && changed.length == 1) {
 				this._touchStartLocation = {
-					x: e.changedTouches[0].clientX,
-					y: e.changedTouches[0].clientY
+					x: changed[0].clientX,
+					y: changed[0].clientY
 				}
+				this._driftedOutsideThreshold = false;
 			}
 		},
-		
+
 		processTouchEndEvent: function(e, element){
-			if (e.touches.length == 0 && e.changedTouches.length == 1 && this._touchStartLocation) {
-				var x = e.changedTouches[0].clientX,
-					y = e.changedTouches[0].clientY;
-				if (Math.abs(this._touchStartLocation.x - x) < this._driftThreshold && 
-						Math.abs(this._touchStartLocation.y - y) < this._driftThreshold) {
+			var changed = e.changedTouches,
+				x,
+				y;
+
+			if (e.touches.length == 0 && changed.length == 1) {
+				x = changed[0].clientX;
+				y = changed[0].clientY;
+
+				if (this.withinThreshold(x, y) && !this._driftedOutsideThreshold) {
 					this._touchStartLocation = null;
-					var result = {
+					element._isGestureBlocked(this.name) || element._handleTouchEvent(this._type, {
 						x: x,
 						y: y,
-						source: this.getSourceNode(e,element)
-					};
-					if (!element._isGestureBlocked(this.name)) {
-						lang.hitch(element,element._handleTouchEvent("click",result));
-						lang.hitch(element,element._handleTouchEvent(this.name,result));
-					}
+						source: this.getSourceNode(e, element)
+					});
 				}
 			}
 		},
-		
+
+		processTouchMoveEvent: function(e, element) {
+			var changed = e.changedTouches;
+			this._driftedOutsideThreshold = changed.length == 1 && !this.withinThreshold(changed[0].clientX, changed[0].clientY);
+		},
+
 		processTouchCancelEvent: function(e, element){
 			this._touchStartLocation = null;
 		}
@@ -12409,7 +14036,7 @@ define(function() {
 "Ti/UI/MobileWeb/TableViewSeparatorStyle":function(){
 /* /titanium/Ti/UI/MobileWeb/TableViewSeparatorStyle.js */
 
-define("Ti/UI/MobileWeb/TableViewSeparatorStyle", ["Ti/_/lang"], function(lang) {
+define(["Ti/_/lang"], function(lang) {
 
 	return lang.setObject("Ti.UI.MobileWeb.TableViewSeparatorStyle", {}, {
 		constants: {
@@ -12437,6 +14064,8 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/_/Map/Google", "Ti/App/Properties"],
 
 define(["Ti/_/declare", "Ti/UI", "Ti/UI/View"], function(declare, UI, View) {
 
+	var windows = [];
+
 	return declare("Ti._.UI.SuperView", View, {
 
 		destroy: function() {
@@ -12448,26 +14077,48 @@ define(["Ti/_/declare", "Ti/UI", "Ti/UI/View"], function(declare, UI, View) {
 			if (!this._opened) {
 				this._opened = 1;
 				UI._addWindow(this, 1).show();
+
+				var len = windows.length;
+				len && windows[len-1]._handleBlurEvent(2); // only blur the active tab
+				windows.push(this);
+
 				this.fireEvent("open");
 				this._handleFocusEvent();
 			}
 		},
 
 		close: function(args) {
-			if (this._opened) {
-				this._opened = 0;
+			if (this.tab) {
+				this.tab.close(this);
+			} else if (this._opened) {
+				var i = windows.indexOf(this),
+					same = i === windows.length - 1;
+
 				UI._removeWindow(this);
+
+				if (~i) {
+					same && this._handleBlurEvent(1); // blur all tabs
+					windows.splice(i, 1);
+				}
+
 				this.fireEvent("close");
-				this._handleBlurEvent();
+
+				// if we just closed the active window, focus the next top-most window
+				if (same) {
+					for (i = windows.length - 1; i >= 0 && !windows[i]._opened; i--) {}
+					i >= 0 && windows[i]._handleFocusEvent();
+				}
+
+				this._opened = 0;
 			}
 		},
-		
+
 		_handleFocusEvent: function(args) {
-			this.fireEvent("focus",args);
+			this.fireEvent("focus", args);
 		},
-		
+
 		_handleBlurEvent: function(args) {
-			this.fireEvent("blur",args);
+			this.fireEvent("blur", args);
 		}
 
 	});
@@ -12513,11 +14164,11 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
 					if (!element._isGestureBlocked(this.name)) {
 						this.blocking.push("singletap");
 						this.blocking.push("doubletap");
-						lang.hitch(element,element._handleTouchEvent("longpress",{
+						element._handleTouchEvent("longpress",{
 							x: e.changedTouches[0].clientX,
 							y: e.changedTouches[0].clientY,
 							source: this.getSourceNode(e,element)
-						}));
+						});
 					}
 				}),this._timeThreshold);
 			}
@@ -12565,17 +14216,16 @@ define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function
  */
 
 define(
-	["Ti/_", "Ti/_/analytics", "Ti/App", "Ti/_/Evented", "Ti/_/lang", "Ti/_/ready", "Ti/_/style", "Ti/Buffer", "Ti/Platform", "Ti/UI", "Ti/Locale", "Ti/_/include"],
-	function(_, analytics, App, Evented, lang, ready, style, Buffer, Platform, UI) {
+	["Ti/_", "Ti/API", "Ti/_/analytics", "Ti/App", "Ti/_/Evented", "Ti/_/has", "Ti/_/lang", "Ti/_/ready", "Ti/_/style", "Ti/Buffer", "Ti/Platform", "Ti/UI", "Ti/Locale", "Ti/_/include"],
+	function(_, API, analytics, App, Evented, has, lang, ready, style, Buffer, Platform, UI) {
 
 	var global = window,
-		cfg = require.config,
-		deployType = cfg.app.deployType,
+		req = require,
+		cfg = req.config,
+		deployType = App.deployType,
 		ver = cfg.ti.version,
-		is = require.is,
-		each = require.each,
-		has = require.has,
-		on = require.on,
+		is = req.is,
+		on = req.on,
 		loaded,
 		unloaded,
 		showingError,
@@ -12599,14 +14249,14 @@ define(
 
 			include: function(files) {
 				typeof files === "array" || (files = [].concat(Array.prototype.slice.call(arguments, 0)));
-				each(files, function(f) {
+				files.forEach(function(f) {
 					require("Ti/_/include!" + f);
 				});
 			},
 
 			deferStart: function() {
 				if (loaded) {
-					console.warn("app.js already loaded!");
+					API.warn("app.js already loaded!");
 				} else {
 					var n = Math.round(Math.random()*1e12);
 					waiting.push(n);
@@ -12614,15 +14264,15 @@ define(
 						var p = waiting.indexOf(n);
 						~p && waiting.splice(p, 1);
 						loaded = 1;
-						waiting.length || require(cfg.main || ["app.js"]);
+						if (!waiting.length) {
+							has("ti-instrumentation") && instrumentation.stopTest(instrumentation.systemLoadTimeTest);
+							require(cfg.main || ["app.js"]);
+						}
 					};
 				}
 			}
 		}),
 		loadAppjs = Ti.deferStart();
-
-	// add has() tests
-	has.add("devmode", deployType === "development");
 
 	// Object.defineProperty() shim
 	if (!has("object-defineproperty")) {
@@ -12732,21 +14382,6 @@ define(
 		};
 	}
 
-	// console.*() shim	
-	console === void 0 && (console = {});
-
-	// make sure "log" is always at the end
-	each(["debug", "info", "warn", "error", "log"], function (c) {
-		console[c] || (console[c] = ("log" in console)
-			?	function () {
-					var a = Array.apply({}, arguments);
-					a.unshift(c + ":");
-					console.log(a.join(" "));
-				}
-			:	function () {}
-		);
-	});
-
 	// JSON.parse() and JSON.stringify() shim
 	if (!has("json-stringify")) {
 		function escapeString(s){
@@ -12851,8 +14486,7 @@ define(
 	Object.defineProperty(global, "Ti", { value: Ti, writable: false });
 	Object.defineProperty(global, "Titanium", { value: Ti, writable: false });
 
-	// print the Titanium version *after* the console shim
-	console.info("[INFO] Appcelerator Titanium " + ver + " Mobile Web");
+	API.info("Appcelerator Titanium " + ver + " Mobile Web");
 
 	// make sure we have some vendor prefixes defined
 	cfg.vendorPrefixes || (cfg.vendorPrefixes = ["", "Moz", "Webkit", "O", "ms"]);
@@ -12885,24 +14519,26 @@ define(
 						backgroundColor: "#f00",
 						top: "100%",
 						height: "100%",
-						layout: "vertical"
+						layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 					}),
 					view,
-					button,
-					makeLabel = function(text, height, color, fontSize) {
-						win.add(UI.createLabel({
-							color: color,
-							font: { fontSize: fontSize, fontWeight: "bold" },
-							height: height,
-							left: 10,
-							right: 10,
-							textAlign: UI.TEXT_ALIGNMENT_CENTER,
-							text: text
-						}));
-					};
+					button;
+
+				function makeLabel(text, height, color, fontSize) {
+					win.add(UI.createLabel({
+						color: color,
+						font: { fontSize: fontSize, fontWeight: "bold" },
+						height: height,
+						left: 10,
+						right: 10,
+						textAlign: UI.TEXT_ALIGNMENT_CENTER,
+						text: text
+					}));
+				}
 
 				makeLabel("Application Error", "15%", "#0f0", "24pt");
-				makeLabel((e.message || "Unknown error").replace(/([^:]+:)/, "").trim() + (filename && filename !== "undefined" ? " at " + filename : "") + (line ? " (line " + line + ")" : ""), "45%", "#fff", "16pt");
+				makeLabel((e.message || "Unknown error").trim() + (filename && filename !== "undefined" ? " at " + filename : "") + (line ? " (line " + line + ")" : ""), "45%", "#fff", "16pt");
+
 				win.add(view = UI.createView({ height: "12%" }));
 				view.add(button = UI.createButton({ title: "Dismiss" }));
 				win.addEventListener("close", function() { win.destroy(); });
@@ -12915,6 +14551,7 @@ define(
 						showingError = 0;
 					});
 				});
+
 				makeLabel("Error messages will only be displayed during development. When your app is packaged for final distribution, no error screen will appear. Test your code!", "28%", "#000", "10pt");
 				
 				on.once(win,"postlayout", function() {
@@ -12940,9 +14577,9 @@ define(
 			padding: 0
 		});
 
-		if (cfg.app.analytics) {
+		if (App.analytics) {
 			// enroll event
-			if (localStorage.getItem("mobileweb_enrollSent") === null) {
+			if (localStorage.getItem("ti:enrolled") === null) {
 				// setup enroll event
 				analytics.add("ti.enroll", "ti.enroll", {
 					app_name: App.name,
@@ -12955,7 +14592,7 @@ define(
 					platform: Platform.name,
 					model: Platform.model
 				});
-				localStorage.setItem("mobileweb_enrollSent", true)
+				localStorage.setItem("ti:enrolled", true)
 			}
 
 			// app start event
@@ -12964,9 +14601,11 @@ define(
 				deploytype: deployType,
 				os: Platform.osname,
 				osver: Platform.ostype,
-				version: cfg.tiVersion,
+				version: cfg.ti.version,
+				platform: Platform.name,
+				model: Platform.model,
 				un: null,
-				app_version: cfg.appVersion,
+				app_version: App.version,
 				nettype: null
 			});
 
@@ -12975,10 +14614,95 @@ define(
 		}
 
 		// load app.js when ti and dom is ready
-		ready(loadAppjs);
+		setTimeout(loadAppjs, 1);
 	});
 
 	return Ti;
+
+});
+},
+"Ti/_/Gestures/Dragging":function(){
+/* /titanium/Ti/_/Gestures/Dragging.js */
+
+define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
+
+
+	// This is the amount of space the finger is allowed drift until the gesture is no longer considered a tap
+	var driftThreshold =  25;
+
+	return declare("Ti._.Gestures.Drag", GestureRecognizer, {
+
+		name: "dragging",
+
+		_touchStartLocation: null,
+
+		_cancelDrag: function(e, element) {
+			if (this._touchStartLocation) {
+				this._touchStartLocation = null;
+				!element._isGestureBlocked(this.name) && lang.hitch(element,element._handleTouchEvent("draggingcancel",{
+					source: this.getSourceNode(e,element)
+				}));
+			}
+		},
+
+		_createEvent: function(e, element) {
+			var x = e.changedTouches[0].clientX,
+				y = e.changedTouches[0].clientY,
+				distanceX = x - this._touchStartLocation.x,
+				distanceY = y - this._touchStartLocation.y;
+			return {
+				x: x,
+				y: y,
+				distanceX: distanceX,
+				distanceY: distanceY,
+				distance: Math.sqrt(Math.pow(distanceX, 2) + Math.pow(distanceY, 2)),
+				source: this.getSourceNode(e,element)
+			};
+		},
+
+		processTouchStartEvent: function(e, element){
+			if (e.touches.length == 1 && e.changedTouches.length == 1) {
+				this._touchStartLocation = {
+					x: e.changedTouches[0].clientX,
+					y: e.changedTouches[0].clientY
+				}
+				!element._isGestureBlocked(this.name) && lang.hitch(element,element._handleTouchEvent("draggingstart",this._createEvent(e, element)));
+			} else if (this._touchStartLocation) {
+				this._cancelDrag(e, element);
+			}
+		},
+
+		processTouchEndEvent: function(e, element){
+			var touchStartLocation = this._touchStartLocation;
+			if (touchStartLocation) {
+				var distance = Math.sqrt(Math.pow(e.changedTouches[0].clientX - touchStartLocation.x, 2) +
+					Math.pow(e.changedTouches[0].clientY - touchStartLocation.y, 2));
+				if (e.touches.length == 0 && e.changedTouches.length == 1 && distance > driftThreshold) {
+					!element._isGestureBlocked(this.name) && lang.hitch(element,element._handleTouchEvent("draggingend",this._createEvent(e, element)));
+					this._touchStartLocation = null;
+				} else {
+					this._cancelDrag(e, element);
+				}
+			}
+		},
+
+		processTouchMoveEvent: function(e, element) {
+			if (this._touchStartLocation) {
+				if (e.touches.length == 1 && e.changedTouches.length == 1) {
+					if (!element._isGestureBlocked(this.name)) {
+						lang.hitch(element,element._handleTouchEvent("dragging",this._createEvent(e, element)));
+					}
+				} else {
+					this._cancelDrag(e, element);
+				}
+			}
+		},
+
+		processTouchCancelEvent: function(e, element){
+			this._touchStartLocation && this._cancelDrag(e, element);
+		}
+
+	});
 
 });
 },
@@ -13028,208 +14752,81 @@ define(["Ti/_/declare", "Ti/_/Evented"], function(declare, Evented) {
 
 define(["Ti/_/declare", "Ti/_/dom", "Ti/_/UI/Element", "Ti/_/lang", "Ti/_/string", "Ti/_/Layouts", "Ti/_/style", "Ti/UI"],
 	function(declare, dom, Element, lang, string, Layouts, style, UI) {
-		
-	var unitize = dom.unitize,
-		set = style.set,
-		View;
 
-	return View = declare("Ti.UI.View", Element, {
-
-		_parent: null,
+	return declare("Ti.UI.View", Element, {
 
 		constructor: function() {
-			this.children = [];
+			this.constants.__values__.children = [];
 			this.layout = "composite";
 			this.containerNode = this.domNode;
 		},
 
+		/**
+		 * Marks a view as "published," meaning it will show up in {@link Ti#UI#View#children} and can be the source of
+		 * UI events.
+		 *
+		 * @private
+		 * @name Ti#UI#View#_markPublished
+		 * @param {Ti.UI.View} view The view to mark as published.
+		 */
+		_publish: function(view) {
+			this.children.push(view);
+			view._isPublished = 1;
+		},
+
+		/**
+		 * Marks a view as "unpublished," meaning it will <em>not</em> show up in {@link Ti#UI#View#children} and can
+		 * <em>not</em> be the source of UI events.
+		 *
+		 * @private
+		 * @name Ti#UI#View#_markPublished
+		 * @param {Ti.UI.View} view The view to mark as unpublished.
+		 */
+		_unpublish: function(view) {
+			var children = this.children,
+				viewIdx = children.indexOf(view);
+			!~viewIdx && children.splice(viewIdx,1);
+		},
+
 		add: function(view) {
 			this._add(view);
+			this._publish(view);
 		},
 
 		remove: function(view) {
 			this._remove(view);
-		},
-
-		destroy: function() {
-			if (this.children) {
-				var c;
-				while (this.children.length) {
-					c = this.children.splice(0, 1);
-					c[0].destroy();
-				}
-			}
-			Element.prototype.destroy.apply(this, arguments);
-		},
-
-		_getScrollableContentWidth: function() {
-			return 600;
-		},
-
-		_getScrollablePosition: function() {
-			return {x: 0, y: 0};
-		},
-
-		_createHorizontalScrollBar: function() {
-			var scrollBar = this._horizontalScrollBar = dom.create("div", {
-				className: "TiUIScrollBar",
-				style: {
-					position: 'absolute',
-					zIndex: 0x7FFFFFFF, // Max (32-bit) z-index
-					border: "3px solid #555",
-					borderRadius: "3px",
-					height: "0px",
-					bottom: "0px",
-					opacity: 0
-				}
-			}, this.domNode);
-		},
-
-		_destroyHorizontalScrollBar: function() {
-			this._cancelPreviousAnimation();
-			dom.destroy(this._horizontalScrollBar);
-		},
-
-		_createVerticalScrollBar: function() {
-			var scrollBar = this._verticalScrollBar = dom.create("div", {
-				className: "TiUIScrollBar",
-				style: {
-					position: 'absolute',
-					zIndex: 0x7FFFFFFF, // Max (32-bit) z-index
-					border: "3px solid #555",
-					borderRadius: "3px",
-					width: "0px",
-					right: "0px",
-					opacity: 0
-				}
-			}, this.domNode);
-		},
-		
-		_destroyVerticalScrollBar: function() {
-			this._cancelPreviousAnimation();
-			dom.destroy(this._verticalScrollBar);
-		},
-		
-		_cancelPreviousAnimation: function() {
-			if (this._isScrollBarActive) {
-				set(this._horizontalScrollBar,"transition","");
-				set(this._verticalScrollBar,"transition","");
-				clearTimeout(this._horizontalScrollBarTimer);
-				clearTimeout(this._verticalScrollBarTimer);
-			}
-		},
-		
-		_startScrollBars: function(normalizedScrollPosition, visibleAreaRatio) {
-			
-			this._cancelPreviousAnimation();
-			
-			if (this._horizontalScrollBar && visibleAreaRatio.x < 1 && visibleAreaRatio.x > 0) {
-				var startingX = normalizedScrollPosition.x,
-					measuredWidth = this._measuredWidth;
-				startingX < 0 && (startingX = 0);
-				startingX > 1 && (startingX = 1);
-				this._horizontalScrollBarWidth = (measuredWidth - 6) * visibleAreaRatio.x;
-				this._horizontalScrollBarWidth < 10 && (this._horizontalScrollBarWidth = 10);
-				set(this._horizontalScrollBar, {
-					opacity: 0.5,
-					left: unitize(startingX * (measuredWidth - this._horizontalScrollBarWidth - 6)),
-					width: unitize(this._horizontalScrollBarWidth)
-				});
-				this._isScrollBarActive = true;
-			}
-			
-			if (this._verticalScrollBar && visibleAreaRatio.y < 1 && visibleAreaRatio.y > 0) {
-				var startingY = normalizedScrollPosition.y,
-					measuredHeight = this._measuredHeight;
-				startingY < 0 && (startingY = 0);
-				startingY > 1 && (startingY = 1);
-				this._verticalScrollBarHeight = (measuredHeight - 6) * visibleAreaRatio.y;
-				this._verticalScrollBarHeight < 10 && (this._verticalScrollBarHeight = 10);
-				set(this._verticalScrollBar, {
-					opacity: 0.5,
-					top: unitize(startingY * (measuredHeight - this._verticalScrollBarHeight - 6)),
-					height: unitize(this._verticalScrollBarHeight)
-				});
-				this._isScrollBarActive = true;
-			}
-		},
-		
-		_updateScrollBars: function(normalizedScrollPosition) {
-			if (!this._isScrollBarActive) {
-				return;
-			}
-			
-			if (this._horizontalScrollBar) {
-				var newX = normalizedScrollPosition.x,
-					measuredWidth = this._measuredWidth;
-				newX < 0 && (newX = 0);
-				newX > 1 && (newX = 1);
-				set(this._horizontalScrollBar,"left",unitize(newX * (measuredWidth - this._horizontalScrollBarWidth - 6)));
-			}
-			
-			if (this._verticalScrollBar) {
-				var newY = normalizedScrollPosition.y,
-					measuredHeight = this._measuredHeight;
-				newY < 0 && (newY = 0);
-				newY > 1 && (newY = 1);
-				set(this._verticalScrollBar,"top",unitize(newY * (measuredHeight - this._verticalScrollBarHeight - 6)));
-			}
-		},
-		
-		_endScrollBars: function() {
-			if (!this._isScrollBarActive) {
-				return;
-			}
-			
-			var self = this;
-			if (this._horizontalScrollBar) {
-				var horizontalScrollBar = this._horizontalScrollBar;
-				if (horizontalScrollBar) {
-					set(horizontalScrollBar,"transition","all 1s ease-in-out");
-					setTimeout(function(){
-						set(horizontalScrollBar,"opacity",0);
-						self._horizontalScrollBarTimer = setTimeout(function(){
-							self._isScrollBarActive = false;
-							set(horizontalScrollBar,"transition","");
-						},500);
-					},0);
-				}
-			}
-			
-			if (this._verticalScrollBar) {
-				var verticalScrollBar = this._verticalScrollBar;
-				if (verticalScrollBar) {
-					set(verticalScrollBar,"transition","all 1s ease-in-out");
-					setTimeout(function(){
-						set(verticalScrollBar,"opacity",0);
-						self._verticalScrollBarTimer = setTimeout(function(){
-							self._isScrollBarActive = false;
-							set(verticalScrollBar,"transition","");
-						},500);
-					},0);
-				}
-			}
+			this._unpublish(view);
 		},
 
 		_defaultWidth: UI.FILL,
 
 		_defaultHeight: UI.FILL,
 
+		constants: {
+			children: void 0
+		},
+
 		properties: {
 			layout: {
 				set: function(value) {
-					var match = value.match(/^(horizontal|vertical)$/),
-						value = match ? match[0] : "composite";
+					var match = value.match(/^(horizontal|vertical|constrainingHorizontal|constrainingVertical)$/);
+					value = match ? match[0] : "composite";
 
 					if (this._layout) {
 						this._layout.destroy();
 						this._layout = null;
 					}
 
-					this._layout = new Layouts[string.capitalize(value)](this);
+					this._layout = new Layouts[string.capitalize(value === "horizontal" && !this.horizontalWrap ? "constrainingHorizontal" : value)](this);
 
 					return value;
 				}
+			},
+			horizontalWrap: {
+				post: function() {
+					this.layout = this.layout; // Force a new layout to be created.
+				},
+				value: true
 			}
 		}
 
@@ -13261,7 +14858,7 @@ define(function() {
 					var i = 0,
 						events = this.listeners[name],
 						l = events && events.length || 0;
-	
+
 					for (; i < l; i++) {
 						events[i] === handler && events.splice(i, 1);
 					}
@@ -13309,13 +14906,14 @@ define(function() {
 "Ti/_/Filesystem/Local":function(){
 /* /titanium/Ti/_/Filesystem/Local.js */
 
-define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
-	function(declare, encoding, lang, API, Blob) {
+define(["Ti/_", "Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
+	function(_, declare, encoding, lang, API, Blob) {
 
 	var reg,
 		regDate = (new Date()).getTime(),
 		File,
 		Filesystem,
+		is = require.is,
 		ls = localStorage,
 		slash = '/',
 		metaMap = {
@@ -13481,7 +15079,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 	return File = declare("Ti._.Filesystem.Local", null, {
 
 		constructor: function(path) {
-			if (require.is(path, "String")) {
+			if (is(path, "String")) {
 				var match = path.match(pathRegExp),
 					b = !match[1] && match[3];
 
@@ -13618,6 +15216,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 						ls.removeItem(key);
 					}
 				}
+				this._exists = 0;
 				ls.removeItem(metaPrefix + path);
 				ls.removeItem(blobPrefix + path);
 				return true;
@@ -13628,6 +15227,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 		deleteFile: function() {
 			if (this.exists() && this.isFile() && !this.readonly) {
 				var path = this.nativePath;
+				this._exists = 0;
 				ls.removeItem(metaPrefix + path);
 				ls.removeItem(blobPrefix + path);
 				return true;
@@ -13713,7 +15313,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 						nativePath: path
 					};
 
-				if (this._remote && /^(application|image|audio|video)\//.test(type)) {
+				if (this._remote && _.isBinaryMimeType(type)) {
 					while (i < len) {
 						binaryData += String.fromCharCode(data.charCodeAt(i++) & 0xff);
 					}
@@ -13786,6 +15386,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 		write: function(/*String|File|Blob*/data, append) {
 			var path = this.nativePath;
 			if (path && this.isFile() && !this.readonly && this.parent && !this.parent.readonly) {
+				data && is(data, "String") && (this._mimeType = mimeTypes[1]);
 				switch (data && data.declaredClass) {
 					case "Ti.Filesystem.File":
 						data = data.read();
@@ -13793,7 +15394,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 						this._mimeType = data.mimeType;
 						data = data._data || "";
 				}
-				this._exists = true;
+				this._exists = 1;
 				this._modified = (new Date()).getTime();
 				this._created || (this._created = this._modified);
 				this.constants.__values__.size = setLocal(path, append ? this.read() + data : data);
@@ -13805,7 +15406,7 @@ define(["Ti/_/declare", "Ti/_/encoding", "Ti/_/lang", "Ti/API", "Ti/Blob"],
 		_create: function(type) {
 			if (!this.exists() && this.parent && !this.parent.readonly && mkdirs(this.parent.nativePath)) {
 				this._created = this._modified = (new Date()).getTime();
-				this._exists = true;
+				this._exists = 1;
 				this._type = type;
 				return this._save();
 			}
@@ -13860,6 +15461,456 @@ define(["Ti/_/Evented", "Ti/_/lang"],
 
 });
 
+},
+"Ti/_/UI/KineticScrollView":function(){
+/* /titanium/Ti/_/UI/KineticScrollView.js */
+
+define(["Ti/_/browser", "Ti/_/declare", "Ti/UI/View", "Ti/_/lang", "Ti/_/dom", "Ti/_/style", "Ti/UI", "Ti/_/event"],
+	function(browser, declare, View, lang, dom, style, UI, event) {
+
+	var setStyle = style.set,
+		unitize = dom.unitize,
+		calculateDistance = dom.calculateDistance,
+		on = require.on,
+		transitionEvents = {
+			webkit: "webkitTransitionEnd",
+			trident: "msTransitionEnd",
+			gecko: "transitionend",
+			presto: "oTransitionEnd"
+		},
+		transitionEnd = transitionEvents[browser.runtime] || "transitionEnd",
+
+		// This specifies the minimum distance that a finger must travel before it is considered a swipe
+		distanceThreshold = 50,
+
+		// The maximum angle, in radians, from the axis a swipe is allowed to travel before it is no longer considered a swipe
+		angleThreshold = Math.PI/6, // 30 degrees
+
+		// This sets the minimum velocity that determines whether a swipe was a flick or a drag
+		velocityThreshold = 0.5,
+
+		// This determines the minimum distance scale (i.e. width divided by this value) before a flick requests a page turn
+		minimumFlickDistanceScaleFactor = 15,
+
+		// This determines the minimum distance scale (i.e. width divided by this value) before a drag requests a page turn
+		minimumDragDistanceScaleFactor = 2,
+
+		// The default velocity when there isn't enough data to calculate the velocity
+		defaultVelocity = 0.5,
+
+		// This is the limit that elastic drags will go towards (i.e. limit as x->infinity = elasticityLimit)
+		elasticityLimit = 100,
+
+		// Controls the friction curve for elastic dragging. The higher the value, the sooner drag starts to kick in. 
+		// Must be greater than or equal to elasticityLimit otherwise the curve has a slope greater than 1, which is bad.
+		elasticityDrag = 100;
+
+	return declare("Ti._.UI.KineticScrollView", View, {
+
+		_initKineticScrollView: function(contentContainer, elasticity, scrollbars, enableMouseWheel){
+
+			var contentContainerDomNode,
+				self = this,
+				velocity = 0,
+				startTranslationX,
+				startTranslationY,
+				translationX,
+				translationY,
+				minTranslationX,
+				minTranslationY,
+				positionData,
+				previousTime,
+				currentTime,
+				period,
+				previousTranslationX,
+				previousTranslationY,
+				numSamples,
+				velocityX,
+				velocityY,
+				scrollbarTimeout;
+			self._currentTranslationX = 0;
+			self._currentTranslationY = 0;
+			self._horizontalElastic = elasticity === "horizontal" || elasticity === "both";
+			self._verticalElastic = elasticity === "vertical" || elasticity === "both";
+			
+			(scrollbars === "horizontal" || scrollbars === "both") && this._createHorizontalScrollBar();
+			(scrollbars === "vertical" || scrollbars === "both") && this._createVerticalScrollBar();
+
+			// Create the content container
+			self._add(self._contentContainer = contentContainer);
+			contentContainerDomNode = contentContainer.domNode;
+
+			// Calculate the velocity by calculating a weighted slope average, favoring more recent movement
+			function calculateVelocity() {
+				currentTime = (new Date).getTime();
+				period = currentTime - previousTime;
+				previousTime = currentTime;
+				if (numSamples++) {
+					velocityX = (velocityX * (numSamples - 1) + numSamples * (translationX - previousTranslationX) / period) / 2 / numSamples;
+					velocityY = (velocityY * (numSamples - 1) + numSamples * (translationY - previousTranslationY) / period) / 2 / numSamples;
+				} else {
+					velocityX = (translationX - startTranslationX) / period;
+					velocityY = (translationY - startTranslationY) / period;
+				}
+			}
+
+			on(self, "draggingstart", function(e) {
+				if (this.scrollingEnabled) {
+
+					// Initialize the velocity calculations
+					velocityX = void 0;
+					velocityY = void 0;
+					startTranslationX = self._currentTranslationX;
+					startTranslationY = self._currentTranslationY;
+					numSamples = 0;
+					previousTime = (new Date).getTime();
+
+					minTranslationX = self._minTranslationX = Math.min(0, self._measuredWidth - self._borderLeftWidth - self._borderRightWidth - self._contentContainer._measuredWidth);
+					minTranslationY = self._minTranslationY = Math.min(0, self._measuredHeight - self._borderTopWidth - self._borderBottomWidth - self._contentContainer._measuredHeight);
+
+					// Start the scroll bars
+					var width = self._measuredWidth,
+						height = self._measuredHeight,
+						contentWidth = contentContainer._measuredWidth,
+						contentHeight = contentContainer._measuredHeight;
+					self._startScrollBars({
+						x: -self._currentTranslationX / (contentWidth - width),
+						y: -self._currentTranslationY / (contentHeight - height)
+					},
+					{
+						x: width / contentWidth,
+						y: height / contentHeight
+					});
+
+					// Call the callback
+					self._handleDragStart && self._handleDragStart(e);
+				}
+			});
+
+			on(self, "dragging", function(e) {
+				if (self.scrollingEnabled) {
+					// Update the velocity calculations
+					translationX = startTranslationX + e.distanceX;
+					translationY = startTranslationY + e.distanceY;
+					calculateVelocity();
+
+					// Update the translation
+					self._setTranslation(previousTranslationX = translationX, previousTranslationY = translationY);
+
+					// Update the scroll bars
+					var width = self._measuredWidth,
+						height = self._measuredHeight,
+						contentWidth = contentContainer._measuredWidth,
+						contentHeight = contentContainer._measuredHeight;
+					self._updateScrollBars({
+						x: -self._currentTranslationX / (contentWidth - width),
+						y: -self._currentTranslationY / (contentHeight - height)
+					});
+					
+					self._handleDrag && self._handleDrag(e);
+				}
+			});
+
+			on(self, "draggingcancel", function(e) {
+				if (self.scrollingEnabled) {
+					self._animateToPosition(startTranslationX, startTranslationY, 400 + 0.3 * calculateDistance(
+							startTranslationX, startTranslationY, self._currentTranslationX, self._currentTranslationY),
+						"ease-in-out", function(){
+							self._handleDragCancel && self._handleDragCancel(e);
+						});
+					self._endScrollBars();
+					self._handleDragCancel && self._handleDragCancel(e);
+				}
+			});
+
+			on(self, "draggingend", function(e) {
+				if (self.scrollingEnabled) {
+					translationX = startTranslationX + e.distanceX;
+					translationY = startTranslationY + e.distanceY;
+					calculateVelocity();
+					var x = self._currentTranslationX,
+						y = self._currentTranslationY,
+						springBack;
+
+					// Spring back if need be
+					if (x > 0) {
+						x = 0;
+						springBack = 1;
+					} else if(x < minTranslationX) {
+						x = minTranslationX;
+						springBack = 1;
+					}
+					if (y > 0) {
+						y = 0;
+						springBack = 1;
+					} else if(y < minTranslationY) {
+						y = minTranslationY;
+						springBack = 1;
+					}
+
+					if (springBack) {
+						self._animateToPosition(x, y, 200, "ease-out", function(){
+							self._handleDragEnd && self._handleDragEnd(e);
+						});
+					} else {
+						self._handleDragEnd && self._handleDragEnd(e, velocityX, velocityY);
+					}
+				}
+			});
+
+			// Handle mouse wheel scrolling
+			enableMouseWheel && (this._disconnectMouseWheelEvent = on(self.domNode, "mousewheel",function(e) {
+				if (self.scrollingEnabled) {
+					var distanceX = contentContainer._measuredWidth - self._measuredWidth,
+						distanceY = contentContainer._measuredHeight - self._measuredHeight,
+						currentPositionX = -self._currentTranslationX,
+						currentPositionY = -self._currentTranslationY;
+
+					minTranslationX = self._minTranslationX = Math.min(0, self._measuredWidth - self._borderLeftWidth - self._borderRightWidth - self._contentContainer._measuredWidth);
+					minTranslationY = self._minTranslationY = Math.min(0, self._measuredHeight - self._borderTopWidth - self._borderBottomWidth - self._contentContainer._measuredHeight);
+
+					// Start the scrollbar
+					self._startScrollBars({
+						x: currentPositionX / distanceX,
+						y: currentPositionY / distanceY
+					},
+					{
+						x: self._measuredWidth / contentContainer._measuredWidth,
+						y: self._measuredHeight / contentContainer._measuredHeight
+					});
+
+					// Set the scroll position
+					self._setTranslation(Math.min(0, Math.max(self._minTranslationX,-currentPositionX + e.wheelDeltaX)),
+						Math.min(0, Math.max(self._minTranslationY,-currentPositionY + e.wheelDeltaY)));
+
+					// Create the scroll event and immediately update the position
+					self._updateScrollBars({
+						x: currentPositionX / distanceX,
+						y: currentPositionY / distanceY
+					});
+					clearTimeout(scrollbarTimeout);
+					scrollbarTimeout = setTimeout(function(){
+						self._endScrollBars();
+					},500);
+
+					self._handleMouseWheel && self._handleMouseWheel();
+				}
+			}));
+		},
+
+		destroy: function() {
+			this._disconnectMouseWheelEvent && this._disconnectMouseWheelEvent();
+			View.prototype.destroy.apply(this, arguments);
+		},
+
+		_animateToPosition: function(destinationTranslationX, destinationTranslationY, duration, curve, callback) {
+			var self = this,
+				contentContainer = self._contentContainer,
+				contentContainerDomNode = contentContainer.domNode;
+			if (calculateDistance(self._currentTranslationX, self._currentTranslationY, destinationTranslationX, destinationTranslationY) < 1) {
+				self._setTranslation(destinationTranslationX, destinationTranslationY);
+				callback();
+			} else {
+				setStyle(contentContainerDomNode, "transition", "all " + duration + "ms " + curve);
+				setTimeout(function(){
+					self._setTranslation(destinationTranslationX, destinationTranslationY);
+					self._animateScrollBars({
+						x: -self._currentTranslationX / (contentContainer._measuredWidth - self._measuredWidth),
+						y: -self._currentTranslationY / (contentContainer._measuredHeight - self._measuredHeight)
+					}, duration, curve);
+				},1);
+				on.once(contentContainerDomNode, transitionEnd, function(){
+					setStyle(contentContainerDomNode, "transition", "");
+					callback && callback();
+				});
+			}
+		},
+
+		_setTranslation: function(translationX, translationY) {
+
+			// Check if the translation is outside the limits of the view and apply elasticity
+			function elastize(value) {
+				return elasticityLimit * (-1 / (value / elasticityDrag + 1) + 1);
+			}
+			var contentContainer = this._contentContainer,
+				minTranslationX = this._minTranslationX,
+				minTranslationY = this._minTranslationY,
+				horizontalElastic = this._horizontalElastic && !this.disableBounce && 
+					this._measuredWidth < contentContainer._measuredWidth,
+				verticalElastic = this._verticalElastic && !this.disableBounce && 
+					this._measuredHeight < contentContainer._measuredHeight;
+			if (translationX > 0) {
+				translationX = horizontalElastic ? elastize(translationX) : 0;
+			} else if(translationX < minTranslationX) {
+				translationX = horizontalElastic ? minTranslationX - elastize(minTranslationX - translationX) : minTranslationX;
+			}
+			if (translationY > 0) {
+				translationY = verticalElastic ? elastize(translationY) : 0;
+			} else if(translationY < minTranslationY) {
+				translationY = verticalElastic ? minTranslationY - elastize(minTranslationY - translationY) : minTranslationY;
+			}
+
+			// Apply the translation
+			setStyle(this._contentContainer.domNode, "transform", "translate(" + 
+				(this._currentTranslationX = translationX) + "px, " + (this._currentTranslationY = translationY) + "px)");
+		},
+
+		_createHorizontalScrollBar: function() {
+			this._horizontalScrollBar = dom.create("div", {
+				className: "TiUIScrollBar",
+				style: {
+					position: 'absolute',
+					zIndex: 0x7FFFFFFF, // Max (32-bit) z-index
+					border: "3px solid #555",
+					borderRadius: "3px",
+					height: "0px",
+					bottom: "0px",
+					opacity: 0
+				}
+			}, this.domNode);
+		},
+
+		_destroyHorizontalScrollBar: function() {
+			this._cancelPreviousAnimation();
+			dom.destroy(this._horizontalScrollBar);
+		},
+
+		_createVerticalScrollBar: function() {
+			var scrollBar = this._verticalScrollBar = dom.create("div", {
+				className: "TiUIScrollBar",
+				style: {
+					position: 'absolute',
+					zIndex: 0x7FFFFFFF, // Max (32-bit) z-index
+					border: "3px solid #555",
+					borderRadius: "3px",
+					width: "0px",
+					right: "0px",
+					opacity: 0
+				}
+			}, this.domNode);
+		},
+
+		_destroyVerticalScrollBar: function() {
+			this._cancelPreviousAnimation();
+			dom.destroy(this._verticalScrollBar);
+		},
+
+		_cancelPreviousAnimation: function() {
+			if (this._isScrollBarActive) {
+				setStyle(this._horizontalScrollBar,"transition","");
+				setStyle(this._verticalScrollBar,"transition","");
+				clearTimeout(this._horizontalScrollBarTimer);
+				clearTimeout(this._verticalScrollBarTimer);
+			}
+		},
+
+		_startScrollBars: function(normalizedScrollPosition, visibleAreaRatio) {
+
+			this._cancelPreviousAnimation();
+
+			if (this._horizontalScrollBar && visibleAreaRatio.x < 1 && visibleAreaRatio.x > 0) {
+				var startingX = normalizedScrollPosition.x,
+					measuredWidth = this._measuredWidth;
+				startingX < 0 && (startingX = 0);
+				startingX > 1 && (startingX = 1);
+				this._horizontalScrollBarWidth = (measuredWidth - 6) * visibleAreaRatio.x;
+				this._horizontalScrollBarWidth < 10 && (this._horizontalScrollBarWidth = 10);
+				setStyle(this._horizontalScrollBar, {
+					opacity: 0.5,
+					left: unitize(startingX * (measuredWidth - this._horizontalScrollBarWidth - 6)),
+					width: unitize(this._horizontalScrollBarWidth)
+				});
+				this._isScrollBarActive = true;
+			}
+
+			if (this._verticalScrollBar && visibleAreaRatio.y < 1 && visibleAreaRatio.y > 0) {
+				var startingY = normalizedScrollPosition.y,
+					measuredHeight = this._measuredHeight;
+				startingY < 0 && (startingY = 0);
+				startingY > 1 && (startingY = 1);
+				this._verticalScrollBarHeight = (measuredHeight - 6) * visibleAreaRatio.y;
+				this._verticalScrollBarHeight < 10 && (this._verticalScrollBarHeight = 10);
+				setStyle(this._verticalScrollBar, {
+					opacity: 0.5,
+					top: unitize(startingY * (measuredHeight - this._verticalScrollBarHeight - 6)),
+					height: unitize(this._verticalScrollBarHeight)
+				});
+				this._isScrollBarActive = true;
+			}
+		},
+
+		_updateScrollBars: function(normalizedScrollPosition) {
+			if (this._isScrollBarActive) {
+				this._horizontalScrollBar && setStyle(this._horizontalScrollBar,"left",unitize(Math.max(0,Math.min(1,normalizedScrollPosition.x)) *
+					(this._measuredWidth - this._horizontalScrollBarWidth - 6)));
+				this._verticalScrollBar && setStyle(this._verticalScrollBar,"top",unitize(Math.max(0,Math.min(1,normalizedScrollPosition.y)) *
+					(this._measuredHeight - this._verticalScrollBarHeight - 6)));
+			}
+		},
+
+		_animateScrollBars: function(normalizedScrollPosition, duration, curve) {
+			var self = this,
+				horizontalScrollBar = self._horizontalScrollBar,
+				verticalScrollBar = self._verticalScrollBar;
+			if (self._isScrollBarActive) {
+				if (horizontalScrollBar) {
+					setStyle(horizontalScrollBar, "transition", "all " + duration + "ms " + curve);
+					on.once(horizontalScrollBar, transitionEnd, function(){
+						setStyle(horizontalScrollBar, "transition", "");
+					});
+				}
+				if (verticalScrollBar) {
+					setStyle(verticalScrollBar, "transition", "all " + duration + "ms " + curve);
+					on.once(verticalScrollBar, transitionEnd, function(){
+						setStyle(verticalScrollBar, "transition", "");
+					});
+				}
+				setTimeout(function() {
+					self._updateScrollBars(normalizedScrollPosition);
+				}, 1);
+			}
+		},
+
+		_endScrollBars: function() {
+			var self = this;
+			setTimeout(function(){
+				if (self._isScrollBarActive) {
+					if (self._horizontalScrollBar) {
+						var horizontalScrollBar = self._horizontalScrollBar;
+						if (horizontalScrollBar) {
+							setStyle(horizontalScrollBar,"transition","all 1s ease-in-out");
+							setTimeout(function(){
+								setStyle(horizontalScrollBar,"opacity",0);
+								self._horizontalScrollBarTimer = setTimeout(function(){
+									self._isScrollBarActive = false;
+									setStyle(horizontalScrollBar,"transition","");
+								},500);
+							},0);
+						}
+					}
+		
+					if (self._verticalScrollBar) {
+						var verticalScrollBar = self._verticalScrollBar;
+						if (verticalScrollBar) {
+							setStyle(verticalScrollBar,"transition","all 1s ease-in-out");
+							setTimeout(function(){
+								setStyle(verticalScrollBar,"opacity",0);
+								self._verticalScrollBarTimer = setTimeout(function(){
+									self._isScrollBarActive = false;
+									setStyle(verticalScrollBar,"transition","");
+								},500);
+							},0);
+						}
+					}
+				}
+			}, 10);
+		},
+		
+		properties: {
+			scrollingEnabled: true
+		}
+	});
+});
 },
 "Ti/Geolocation":function(){
 /* /titanium/Ti/Geolocation.js */
@@ -14067,6 +16118,10 @@ define(["Ti/_/Evented", "Ti/_/lang", "Ti/Network"], function(Evented, lang, Netw
 				maximumHeadingAge: 1000,
 				forwardGeocoderTimeout: void 0,
 				reverseGeocoderTimeout: void 0
+			},
+
+			hasCompass: function() {
+				return compassSupport;
 			}
 			
 		},
@@ -14234,10 +16289,13 @@ define({
 		}
 	},
 	off: function(handles) {
-		handles = require.is(handles, "Array") ? handles : [handles];
-		handles.forEach(function(h) {
-			h && h();
-		});
+		var handles = require.is(handles, "Array") ? handles : [handles],
+			h,
+			i = 0,
+			l = handles.length;
+		while (i < l) {
+			(h = handles[i++]) && h();
+		}
 		handles.splice(0);
 	}
 });
@@ -14245,100 +16303,371 @@ define({
 "Ti/_/Layouts/Vertical":function(){
 /* /titanium/Ti/_/Layouts/Vertical.js */
 
-define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/UI"], function(Base, declare, UI) {
+define(["Ti/_/Layouts/Base", "Ti/_/declare", "Ti/UI", "Ti/_/lang", "Ti/_/style"], function(Base, declare, UI, lang, style) {
+	
+	var isDef = lang.isDef,
+		setStyle = style.set,
+		round = Math.round;
 
 	return declare("Ti._.Layouts.Vertical", Base, {
 
 		_doLayout: function(element, width, height, isWidthSize, isHeightSize) {
-			var computedSize = this._computedSize = {width: 0, height: 0},
-				currentTop = 0,
-				children = element.children,
-				availableHeight = height,
-				childrenWithFillHeight = false;
+			var computedSize = {width: 0, height: 0},
+				children = element._children,
+				child,
+				i = 0,
+				layoutCoefficients, 
+				widthLayoutCoefficients, heightLayoutCoefficients, sandboxWidthLayoutCoefficients, sandboxHeightLayoutCoefficients, topLayoutCoefficients, leftLayoutCoefficients, 
+				childSize,
+				measuredWidth, measuredHeight, measuredSandboxHeight, measuredSandboxWidth, measuredLeft, measuredTop,
+				pixelUnits = "px",
+				deferredLeftCalculations = [],
+				runningHeight = 0,
+				len = children.length,
+				verifyChild = this.verifyChild,
+				updateBorder = this.updateBorder,
+				measureNode = this._measureNode,
+				style;
 				
-			// Determine if any children have fill height
-			for (var i = 0; i < children.length; i++) {
-				children[i]._hasFillHeight() && (childrenWithFillHeight = true);
-			}
+			// Calculate size and position for the children
+			for(i = 0; i < len; i++) {
 				
-			// Measure the children
-			if (childrenWithFillHeight) {
-				for (var i = 0; i < children.length; i++) {
-					var child = children[i];
-					if (this.verifyChild(child,element) && !child._hasFillHeight()) {
-						var childHeight;
-						if (child._markedForLayout) {
-							childHeight = child._doLayout({
-								origin: {
-							 		x: 0,
-							 		y: 0
-							 	},
-							 	isParentSize: {
-							 		width: isWidthSize,
-							 		height: isHeightSize
-							 	},
-							 	boundingSize: {
-							 		width: width,
-							 		height: height
-							 	},
-							 	alignment: {
-							 		horizontal: this._defaultHorizontalAlignment,
-							 		vertical: this._defaultVerticalAlignment
-							 	},
-							 	bottomIsMargin: true,
-								positionElement: false,
-						 		layoutChildren: true
-							}).effectiveHeight;
+				child = element._children[i];
+				if (!child._alive || !child.domNode) {
+					this.handleInvalidState(child,element);
+				} else {
+					
+					child._measuredRunningHeight = runningHeight;
+					
+					if (child._markedForLayout) {
+						((child._preLayout && child._preLayout(width, height, isWidthSize, isHeightSize)) || child._needsMeasuring) && measureNode(child, child, child._layoutCoefficients, this);
+									
+						layoutCoefficients = child._layoutCoefficients;
+						widthLayoutCoefficients = layoutCoefficients.width;
+						heightLayoutCoefficients = layoutCoefficients.height;
+						sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth;
+						sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight;
+						leftLayoutCoefficients = layoutCoefficients.left;
+						topLayoutCoefficients = layoutCoefficients.top;
+						
+						measuredWidth = widthLayoutCoefficients.x1 * width + widthLayoutCoefficients.x2;
+						measuredHeight = heightLayoutCoefficients.x1 * height + heightLayoutCoefficients.x2 * (height - runningHeight) + heightLayoutCoefficients.x3;
+						
+						if (child._getContentSize) {
+							childSize = child._getContentSize(measuredWidth, measuredHeight);
 						} else {
-							childHeight = child._measuredEffectiveHeight;
+							childSize = child._layout._doLayout(
+								child, 
+								isNaN(measuredWidth) ? width : measuredWidth - child._borderLeftWidth - child._borderRightWidth, 
+								isNaN(measuredHeight) ? height : measuredHeight - child._borderTopWidth - child._borderBottomWidth, 
+								isNaN(measuredWidth), 
+								isNaN(measuredHeight));
 						}
-						availableHeight -= childHeight;
+						isNaN(measuredWidth) && (measuredWidth = childSize.width + child._borderLeftWidth + child._borderRightWidth);
+						isNaN(measuredHeight) && (measuredHeight = childSize.height + child._borderTopWidth + child._borderBottomWidth);
+						child._measuredWidth = measuredWidth;
+						child._measuredHeight = measuredHeight;
+						
+						if (isWidthSize && leftLayoutCoefficients.x1 !== 0) {
+							deferredLeftCalculations.push(child);
+						} else {
+							measuredLeft = child._measuredLeft = leftLayoutCoefficients.x1 * width + leftLayoutCoefficients.x2 * measuredWidth + leftLayoutCoefficients.x3;
+							measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + measuredWidth + (isNaN(measuredLeft) ? 0 : measuredLeft);
+							measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+						}
+						child._measuredTop = topLayoutCoefficients.x1 * height + topLayoutCoefficients.x2 + runningHeight;
+						
+						measuredSandboxHeight = child._measuredSandboxHeight = sandboxHeightLayoutCoefficients.x1 * height + sandboxHeightLayoutCoefficients.x2 + measuredHeight;
 					}
+					runningHeight = (computedSize.height += child._measuredSandboxHeight);
 				}
 			}
 			
-			// Layout the children
-			for(var i = 0; i < children.length; i++) {
-				
-				// Layout the child
-				var child = children[i],
-					isHeightFill = child._hasFillHeight();
-				if (child._markedForLayout) {
-					child._doLayout({
-					 	origin: {
-					 		x: 0,
-					 		y: currentTop
-					 	},
-					 	isParentSize: {
-					 		width: isWidthSize,
-					 		height: isHeightSize
-					 	},
-					 	boundingSize: {
-					 		width: width,
-					 		height: isHeightFill ? availableHeight : height
-					 	},
-					 	alignment: {
-					 		horizontal: this._defaultHorizontalAlignment,
-					 		vertical: this._defaultVerticalAlignment
-					 	},
-						bottomIsMargin: true,
-					 	positionElement: true,
-					 	layoutChildren: !childrenWithFillHeight || isHeightFill
-				 	});
-				 }
-				
-				// Update the size of the component
-				var rightMostEdge = child._measuredWidth + child._measuredLeft + child._measuredBorderSize.left + child._measuredBorderSize.right + child._measuredRightPadding;
-				currentTop = child._measuredHeight + child._measuredTop + child._measuredBorderSize.top + child._measuredBorderSize.bottom + child._measuredBottomPadding;
-				rightMostEdge > computedSize.width && (computedSize.width = rightMostEdge);
-				currentTop > computedSize.height && (computedSize.height = currentTop);
+			// Calculate the preliminary sandbox widths (missing left, since one of these widths may end up impacting all the lefts)
+			len = deferredLeftCalculations.length;
+			for(i = 0; i < len; i++) {
+				child = deferredLeftCalculations[i];
+				sandboxWidthLayoutCoefficients = child._layoutCoefficients.sandboxWidth;
+				measuredSandboxWidth = child._measuredSandboxWidth = sandboxWidthLayoutCoefficients.x1 * width + sandboxWidthLayoutCoefficients.x2 + child._measuredWidth;
+				measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
 			}
-			return computedSize;
+			
+			// Second pass, if necessary, to determine the left values
+			for(i = 0; i < len; i++) {
+				child = deferredLeftCalculations[i];
+				
+				leftLayoutCoefficients = child._layoutCoefficients.left;
+				sandboxWidthLayoutCoefficients = child._layoutCoefficients.sandboxWidth;
+				measuredWidth = child._measuredWidth;
+				measuredSandboxWidth = child._measuredSandboxWidth;
+				
+				measuredSandboxWidth > computedSize.width && (computedSize.width = measuredSandboxWidth);
+				measuredLeft = child._measuredLeft = leftLayoutCoefficients.x1 * computedSize.width + leftLayoutCoefficients.x2 * measuredWidth + leftLayoutCoefficients.x3;
+				child._measuredSandboxWidth += (isNaN(measuredLeft) ? 0 : measuredLeft);
+			}
+			
+			// Position the children
+			len = children.length;
+			for(i = 0; i < len; i++) {
+				child = children[i];
+				if (child._markedForLayout) {
+					UI._elementLayoutCount++;
+					child = children[i];
+					style = child.domNode.style;
+					style.zIndex = child.zIndex;
+					style.left = round(child._measuredLeft) + pixelUnits;
+					style.top = round(child._measuredTop) + pixelUnits;
+					style.width = round(child._measuredWidth - child._borderLeftWidth - child._borderRightWidth) + pixelUnits;
+					style.height = round(child._measuredHeight - child._borderTopWidth - child._borderBottomWidth) + pixelUnits;
+					child._markedForLayout = false;
+					child.fireEvent("postlayout");
+				}
+			}
+			
+			return this._computedSize = computedSize;
+		},
+		
+		_getWidth: function(node, width) {
+			
+			// Get the width or default width, depending on which one is needed
+			!isDef(width) && (isDef(node.left) + isDef(node.center && node.center.x) + isDef(node.right) < 2) && (width = node._defaultWidth);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (width === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getWidth(node._parent, node._parent.width) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return width;
+		},
+		
+		_getHeight: function(node, height) {
+			
+			// Get the height or default height, depending on which one is needed
+			!isDef(height) && (height = node._defaultHeight);
+			
+			// Check if the width is INHERIT, and if so fetch the inherited width
+			if (height === UI.INHERIT) {
+				if (node._parent._parent) {
+					return node._parent._parent._layout._getHeight(node._parent, node._parent.height) === UI.SIZE ? UI.SIZE : UI.FILL;
+				}
+				// This is the root level content container, which we know has a width of FILL
+				return UI.FILL;
+			}
+			return height;
+		},
+		
+		_isDependentOnParent: function(node){
+			var layoutCoefficients = node._layoutCoefficients;
+			return (!isNaN(layoutCoefficients.width.x1) && layoutCoefficients.width.x1 !== 0) || // width
+				(!isNaN(layoutCoefficients.height.x1) && layoutCoefficients.height.x1 !== 0) ||
+				(!isNaN(layoutCoefficients.height.x2) && layoutCoefficients.height.x2 !== 0) || // height
+				layoutCoefficients.sandboxWidth.x1 !== 0 || // sandbox width
+				layoutCoefficients.sandboxHeight.x1 !== 0 || // sandbox height
+				layoutCoefficients.left.x1 !== 0 || // left
+				layoutCoefficients.top.x1 !== 0; // top
+		},
+		
+		_doAnimationLayout: function(node, animationCoefficients) {
+			
+			var parentWidth = node._parent._measuredWidth,
+				parentHeight = node._parent._measuredHeight,
+				nodeWidth = node._measuredWidth,
+				nodeHeight = node._measuredHeight,
+				runningHeight = node._measuredRunningHeight,
+				width = animationCoefficients.width.x1 * parentWidth + animationCoefficients.width.x2;
+			
+			return {
+				width: width,
+				height: animationCoefficients.height.x1 * parentHeight + animationCoefficients.height.x2 * (parentHeight - runningHeight) + animationCoefficients.height.x3,
+				left: animationCoefficients.left.x1 * parentWidth + animationCoefficients.left.x2 * width + animationCoefficients.left.x3,
+				top: animationCoefficients.top.x1 * parentHeight + animationCoefficients.top.x2 + runningHeight
+			}
+		},
+		
+		_measureNode: function(node, layoutProperties, layoutCoefficients, self) {
+			
+			node._needsMeasuring = false;
+			
+			// Pre-processing
+			var getValueType = self.getValueType,
+				computeValue = self.computeValue,
+			
+				width = self._getWidth(node, layoutProperties.width),
+				widthType = getValueType(width),
+				widthValue = computeValue(width, widthType),
+				
+				height = self._getHeight(node, layoutProperties.height),
+				heightType = getValueType(height),
+				heightValue = computeValue(height, heightType),
+				
+				left = layoutProperties.left,
+				leftType = getValueType(left),
+				leftValue = computeValue(left, leftType),
+				
+				centerX = layoutProperties.center && layoutProperties.center.x,
+				centerXType = getValueType(centerX),
+				centerXValue = computeValue(centerX, centerXType),
+				
+				right = layoutProperties.right,
+				rightType = getValueType(right),
+				rightValue = computeValue(right, rightType),
+				
+				top = layoutProperties.top,
+				topType = getValueType(top),
+				topValue = computeValue(top, topType),
+				
+				bottom = layoutProperties.bottom,
+				bottomType = getValueType(bottom),
+				bottomValue = computeValue(bottom, bottomType),
+				
+				x1, x2, x3,
+				
+				widthLayoutCoefficients = layoutCoefficients.width,
+				heightLayoutCoefficients = layoutCoefficients.height,
+				sandboxWidthLayoutCoefficients = layoutCoefficients.sandboxWidth,
+				sandboxHeightLayoutCoefficients = layoutCoefficients.sandboxHeight,
+				leftLayoutCoefficients = layoutCoefficients.left,
+				topLayoutCoefficients = layoutCoefficients.top;
+			
+			// Width rule evaluation
+			x1 = x2 = 0;
+			if (widthType === UI.SIZE) {
+				x1 = x2 = NaN;
+			} else if (widthType === UI.FILL) {
+				x1 = 1;
+				if (leftType === "%") {
+					x1 -= leftValue;
+				} else if (leftType === "#") {
+					x2 = -leftValue;
+				} else if (rightType === "%") {
+					x1 -= rightValue;
+				} else if (rightType === "#") {
+					x2 = -rightValue;
+				}
+			} else if (widthType === "%") {
+				x1 = widthValue;
+			} else if (widthType === "#") {
+				x2 = widthValue;
+			} else if (leftType === "%") {
+				if (centerXType === "%") {
+					x1 = 2 * (centerXValue - leftValue);
+				} else if (centerXType === "#") {
+					x1 = -2 * leftValue;
+					x2 = 2 * centerXValue;
+				} else if (rightType === "%") {
+					x1 = 1 - leftValue - rightValue;
+				} else if (rightType === "#") {
+					x1 = 1 - leftValue;
+					x2 = -rightValue;
+				}
+			} else if (leftType === "#") {
+				if (centerXType === "%") {
+					x1 = 2 * centerXValue;
+					x2 = -2 * leftValue;
+				} else if (centerXType === "#") {
+					x2 = 2 * (centerXValue - leftValue);
+				} else if (rightType === "%") {
+					x1 = 1 - rightValue;
+					x2 = -leftValue;
+				} else if (rightType === "#") {
+					x1 = 1;
+					x2 = -rightValue - leftValue;
+				}
+			} else if (centerXType === "%") {
+				if (rightType === "%") {
+					x1 = 2 * (rightValue - centerXValue);
+				} else if (rightType === "#") {
+					x1 = -2 * centerXValue;
+					x2 = 2 * rightValue;
+				}
+			} else if (centerXType === "#") {
+				if (rightType === "%") {
+					x1 = 2 * rightValue;
+					x2 = -2 * centerXValue;
+				} else if (rightType === "#") {
+					x2 = 2 * (rightValue - centerXValue);
+				}
+			}
+			widthLayoutCoefficients.x1 = x1;
+			widthLayoutCoefficients.x2 = x2;
+			
+			// Sandbox width/height rule evaluation
+			sandboxWidthLayoutCoefficients.x1 = rightType === "%" ? rightValue : 0;
+			sandboxWidthLayoutCoefficients.x2 = rightType === "#" ? rightValue : 0;
+			
+			// Height rule calculation
+			x1 = x2 = x3 = 0;
+			if (heightType === UI.SIZE) {
+				x1 = x2 = x3 = NaN;
+			} else if (heightType === UI.FILL) {
+				x2 = 1;
+				topType === "%" && (x1 = -topValue);
+				topType === "#" && (x3 = -topValue);
+				bottomType === "%" && (x1 = -bottomValue);
+				bottomType === "#" && (x3 = -bottomValue);
+			} else if (heightType === "%") {
+				x1 = heightValue;
+			} else if (heightType === "#") {
+				x3 = heightValue;
+			}
+			heightLayoutCoefficients.x1 = x1;
+			heightLayoutCoefficients.x2 = x2;
+			heightLayoutCoefficients.x3 = x3;
+			
+			// Sandbox height rule calculation
+			x1 = x2 = 0;
+			topType === "%" && (x1 = topValue);
+			topType === "#" && (x2 = topValue);
+			bottomType === "%" && (x1 += bottomValue);
+			bottomType === "#" && (x2 += bottomValue);
+			sandboxHeightLayoutCoefficients.x1 = x1;
+			sandboxHeightLayoutCoefficients.x2 = x2;
+			
+			// Left rule calculation
+			x1 = x2 = x3 = 0;
+			if (leftType === "%") {
+				x1 = leftValue;
+			} else if(leftType === "#") {
+				x3 = leftValue;
+			} else if (centerXType === "%") {
+				x1 = centerXValue;
+				x2 = -0.5;
+			} else if (centerXType === "#") {
+				x2 = -0.5;
+				x3 = centerXValue;
+			} else if (rightType === "%") {
+				x1 = 1 - rightValue;
+				x2 = -1;
+			} else if (rightType === "#") {
+				x1 = 1;
+				x2 = -1;
+				x3 = -rightValue;
+			} else { 
+				switch(self._defaultHorizontalAlignment) {
+					case "center": 
+						x1 = 0.5;
+						x2 = -0.5;
+						break;
+					case "end":
+						x1 = 1;
+						x2 = -1;
+				}
+			}
+			leftLayoutCoefficients.x1 = x1;
+			leftLayoutCoefficients.x2 = x2;
+			leftLayoutCoefficients.x3 = x3;
+			
+			// Top rule calculation
+			topLayoutCoefficients.x1 = topType === "%" ? topValue : 0;
+			topLayoutCoefficients.x2 = topType === "#" ? topValue : 0;
 		},
 		
 		_defaultHorizontalAlignment: "center",
 		
-		_defaultVerticalAlignment: "top"
+		_defaultVerticalAlignment: "start"
 
 	});
 
@@ -14354,7 +16683,8 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/Locale"], function(declare, Evented,
 		post: function(newValue, oldValue, prop) {
 			this.fireEvent("update", {
 				property: prop,
-				value: newValue
+				value: newValue,
+				oldValue: oldValue
 			});
 		}
 	};
@@ -14400,13 +16730,36 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/Locale"], function(declare, Evented,
 });
 
 },
+"Ti/UI/ActivityIndicatorStyle":function(){
+/* /titanium/Ti/UI/ActivityIndicatorStyle.js */
+
+define(["Ti/_/lang"], function(lang) {
+
+	return lang.setObject("Ti.UI.ActivityIndicatorStyle", {
+		constants: {
+			BIG: 0,
+			BIG_DARK: 1,
+			DARK: 2,
+			PLAIN: 3
+		}
+	});
+	
+});
+},
 "Ti/App":function(){
 /* /titanium/Ti/App.js */
 
-define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
+define(["Ti/_", "Ti/_/Evented", "Ti/_/lang"], function(_, Evented, lang) {
 
 	return lang.mixProps(lang.setObject("Ti.App", Evented), {
-		constants: require.config.app,
+		constants: require.mix({
+			sessionId: function() {
+				var ss = sessionStorage,
+					sid = ss.getItem("ti:sessionId");
+				sid || ss.setItem("ti:sessionId", sid = _.uuid());
+				return sid;
+			}
+		}, require.config.app),
 		
 		getID: function() {
 			return this.id;
@@ -14531,38 +16884,171 @@ define(["./declare", "./lang"], function(declare, lang) {
 "Ti/_/analytics":function(){
 /* /titanium/Ti/_/analytics.js */
 
-define(["Ti/_", "Ti/_/dom", "Ti/_/lang", "Ti/App", "Ti/Platform"], function(_, dom, lang, App, Platform) {
+define(["Ti/_", "Ti/_/dom", "Ti/_/has", "Ti/_/lang", "Ti/App", "Ti/Platform"],
+	function(_, dom, has, lang, App, Platform) {
 
 	var global = window,
-		sessionId = sessionStorage.getItem("ti:sessionId"),
 		is = require.is,
 		cfg = require.config,
 		analyticsEnabled = App.analytics,
-		analyticsStorageName = "ti:analyticsEvents",
-		analyticsEventSeq = 0,
 		analyticsLastSent = null,
 		analyticsUrl = "https://api.appcelerator.net/p/v2/mobile-web-track",
-		pending = {};
+		pending = {},
+		sendTimer,
+		sendDelay = 60000,
+		analytics = {
+			add: function(type, event, data, isUrgent) {
+				if (analyticsEnabled) {
+					// store event
+					var storage = getStorage();
 
-	sessionId || sessionStorage.setItem("ti:sessionId", sessionId = _.uuid());
+					storage.push({
+						id: _.uuid(),
+						type: type,
+						evt: event,
+						ts: (new Date).toISOString().replace('Z', "+0000"),
+						data: data
+					});
+
+					setStorage(storage);
+					this.send(isUrgent);
+				}
+			},
+
+			send: function(isUrgent) {
+				if (analyticsEnabled) {
+					var rand = Math.floor(Math.random() * 1e6),
+						now = (new Date).getTime(),
+						ids = [],
+						jsonStrs = [],
+						sessionId = sessionStorage.getItem("ti:sessionId"),
+						seqId = sessionStorage.getItem("ti:analyticsSeqId"),
+						events = getStorage(),
+						i = 0,
+						len = events.length,
+						evt;
+
+					is(seqId, "String") && (seqId = JSON.parse(seqId));
+
+					clearTimeout(sendTimer);
+
+					if (len && (isUrgent || analyticsLastSent === null || now - analyticsLastSent >= sendDelay)) {
+						sessionId || (sessionId = _.uuid());
+						seqId === null && (seqId = 0);
+
+						while (i < len) {
+							evt = events[i++];
+
+							ids.push(evt.id);
+							jsonStrs.push(JSON.stringify({
+								id: evt.id,
+								mid: Platform.id,
+								rdu: null,
+								type: evt.type,
+								aguid: App.guid,
+								event: evt.evt,
+								seq: seqId++,
+								ver: "2",
+								deploytype: App.deployType,
+								sid: sessionId,
+								ts: evt.ts,
+								data: evt.data
+							}));
+
+							if (evt.type === "ti.end") {
+								seqId = 0;
+								sessionId = _.uuid();
+							}
+						}
+
+						sessionStorage.setItem("ti:sessionId", sessionId);
+						sessionStorage.setItem("ti:analyticsSeqId", seqId);
+
+						pending[rand] = ids;
+						analyticsLastSent = now;
+
+						if (has("analytics-use-xhr")) {
+							var xhr = new XmlHttpRequest;
+							xhr.onreadystatechange = function() {
+								if (xhr.readyState === 4 && xhr.status === 200) {
+									try {
+										onSuccess({ data: eval('(' + xhr.responseText + ')') });
+									} catch (e) {}
+								}
+							};
+							xhr.open("POST", analyticsUrl, true);
+							xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+							xhr.send(lang.urlEncode({ content: jsonStrs }));
+						} else {
+							var body = document.body,
+								iframeName = "analytics" + rand,
+								iframe = dom.create("iframe", {
+									id: iframeName,
+									name: iframeName,
+									style: {
+										display: "none"
+									}
+								}, body),
+								form = dom.create("form", {
+									action: analyticsUrl + "?callback=" + rand + "&output=html",
+									method: "POST",
+									style: {
+										display: "none"
+									},
+									target: iframeName
+								}, body);
+
+							dom.create("input", {
+								name: "content",
+								type: "hidden",
+								value: "[" + jsonStrs.join(",") + "]"
+							}, form);
+
+							// need to delay attaching of iframe events so they aren't prematurely called
+							setTimeout(function() {
+								function onIframeLoaded() {
+									setTimeout(function() {
+										dom.destroy(form);
+										dom.destroy(iframe);
+									}, 1);
+								}
+								iframe.onload = onIframeLoaded;
+								iframe.onerror = onIframeLoaded;
+								form.submit();
+							}, 25);
+						}
+					}
+
+					sendTimer = setTimeout(function() {
+						analytics.send(1);
+					}, sendDelay);
+				}
+			}
+		};
 
 	function getStorage() {
-		var s = localStorage.getItem(analyticsStorageName);
-		return s ? JSON.parse(s) : []
+		var s = localStorage.getItem("ti:analyticsEvents");
+		return s ? JSON.parse(s) : [];
 	}
 
 	function setStorage(data) {
-		localStorage.setItem(analyticsStorageName, JSON.stringify(data));
+		localStorage.setItem("ti:analyticsEvents", JSON.stringify(data));
 	}	
 
 	function onSuccess(response) {
 		if (is(response.data, "Object") && response.data.success) {
 			var ids = pending[response.data.callback],
-				keepers = [];
+				keepers = [],
+				events = getStorage(),
+				i = 0,
+				len = events.length,
+				evt;
+
 			if (ids) {
-				getStorage().forEach(function(evt) {
+				while (i < len) {
+					evt = events[i++];
 					~ids.indexOf(evt.id) || keepers.push(evt);
-				});
+				}
 				setStorage(keepers);
 			}
 		}
@@ -14570,120 +17056,7 @@ define(["Ti/_", "Ti/_/dom", "Ti/_/lang", "Ti/App", "Ti/Platform"], function(_, d
 
 	require.on(global, "message", onSuccess);
 
-	return _.analytics = {
-
-		add: function(type, event, data, isUrgent) {
-			if (analyticsEnabled) {
-				// store event
-				var storage = getStorage();
-					now = new Date(),
-					tz = now.getTimezoneOffset(),
-					atz = Math.abs(tz),
-					formatZeros = function(v, n){
-						var d = (v+'').length;
-						return (d < n ? (new Array(++n - d)).join("0") : "") + v;
-					};
-
-				storage.push({
-					id: _.uuid(),
-					type: type,
-					evt: event,
-					ts: now.toISOString().replace('Z', (tz < 0 ? '-' : '+') + (atz < 100 ? "00" : (atz < 1000 ? "0" : "")) + atz),
-					data: data
-				});
-
-				setStorage(storage);
-				this.send(isUrgent);
-			}
-		},
-
-		send: function(isUrgent) {
-			if (analyticsEnabled) {
-				var rand = Math.floor(Math.random() * 1e6),
-					now = (new Date()).getTime(),
-					ids = [],
-					jsonStrs = [];
-
-				if (!isUrgent && analyticsLastSent !== null && now - analyticsLastSent < 60000 /* 1 minute */) {
-					return;
-				}
-
-				analyticsLastSent = now;
-
-				getStorage().forEach(function(evt) {
-					ids.push(evt.id);
-					jsonStrs.push(JSON.stringify({
-						id: evt.id,
-						mid: Platform.id,
-						rdu: null,
-						type: evt.type,
-						aguid: App.guid,
-						event: evt.evt,
-						seq: analyticsEventSeq++,
-						ver: "2",
-						deploytype: cfg.app.deployType,
-						sid: sessionId,
-						ts: evt.ts,
-						data: /(Array|Object)/.test(is(evt.data)) ? JSON.stringify(evt.data) : evt.data
-					}));
-				});
-
-				pending[rand] = ids;
-
-				if (require.has("analytics-use-xhr")) {
-					var xhr = new XmlHttpRequest;
-					xhr.onreadystatechange = function() {
-						if (xhr.readyState === 4 && xhr.status === 200) {
-							try {
-								onSuccess({ data: eval('(' + xhr.responseText + ')') });
-							} catch (e) {}
-						}
-					};
-					xhr.open("POST", analyticsUrl, true);
-					xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-					xhr.send(lang.urlEncode({ content: jsonStrs }));
-				} else {
-					var body = document.body,
-						iframeName = "analytics" + rand,
-						iframe = dom.create("iframe", {
-							id: iframeName,
-							name: iframeName,
-							style: {
-								display: "none"
-							}
-						}, body),
-						form = dom.create("form", {
-							action: analyticsUrl + "?callback=" + rand + "&output=html",
-							method: "POST",
-							style: {
-								display: "none"
-							},
-							target: iframeName
-						}, body);
-
-					dom.create("input", {
-						name: "content",
-						type: "hidden",
-						value: "[" + jsonStrs.join(",") + "]"
-					}, form);
-
-					// need to delay attaching of iframe events so they aren't prematurely called
-					setTimeout(function() {
-						function onIframeLoaded() {
-							setTimeout(function() {
-								dom.destroy(form);
-								dom.destroy(iframe);
-							}, 1);
-						}
-						iframe.onload = onIframeLoaded;
-						iframe.onerror = onIframeLoaded;
-						form.submit();
-					}, 25);
-				}
-			}
-		}
-
-	};
+	return analytics;
 
 });
 },
@@ -14692,98 +17065,78 @@ define(["Ti/_", "Ti/_/dom", "Ti/_/lang", "Ti/App", "Ti/Platform"], function(_, d
 
 define(["Ti/_/declare", "Ti/_/lang","Ti/_/Gestures/GestureRecognizer"], function(declare,lang,GestureRecognizer) {
 
-	return declare("Ti._.Gestures.Swipe", GestureRecognizer, {
-		
-		name: "swipe",
-		
-		_touchStartLocation: null,
-		_distanceThresholdPassed: false,
-		
 		// This specifies the minimum distance that a finger must travel before it is considered a swipe
-		_distanceThreshold: 25,
-		
-		// The masimum angle, in radians, from the axis a swipe is allowed to travel before it is no longer considered a swipe
-		_angleThreshold: Math.PI/12, // 15 degrees
-		
+	var distanceThreshold = 50,
+
+		// The maximum angle, in radians, from the axis a swipe is allowed to travel before it is no longer considered a swipe
+		angleThreshold = Math.PI/6, // 30 degrees
+
+		// This sets the minimum velocity that determines this is a swipe, or just a drag
+		velocityThreshold = 0.5;
+
+	return declare("Ti._.Gestures.Swipe", GestureRecognizer, {
+
+		name: "swipe",
+
+		_distanceThresholdPassed: false,
+
 		processTouchStartEvent: function(e, element){
 			if (e.touches.length == 1 && e.changedTouches.length == 1) {
 				this._distanceThresholdPassed = false;
 				this._touchStartLocation = {
 					x: e.changedTouches[0].clientX,
 					y: e.changedTouches[0].clientY
-				}
+				};
+				this._startTime = (new Date).getTime();
 			} else {
 				this._touchStartLocation = null;
 			}
 		},
-		
+
 		processTouchEndEvent: function(e, element){
-			if (e.touches.length == 0 && e.changedTouches.length == 1) {
-				this._processSwipeEvent(e,element,true);
-			}
-			this._touchStartLocation = null;
-		},
-		
-		processTouchMoveEvent: function(e, element){
-			if (e.touches.length == 1 && e.changedTouches.length == 1) {
-				this._processSwipeEvent(e,element,false);
-			}
-		},
-		
-		processTouchCancelEvent: function(e, element){
-			this._touchStartLocation = null;
-		},
-		
-		_processSwipeEvent: function(e,element,finishedSwiping) {
-			var x = e.changedTouches[0].clientX,
-				y = e.changedTouches[0].clientY;
-			if (this._touchStartLocation) {
-				var xDiff = Math.abs(this._touchStartLocation.x - x),
-					yDiff = Math.abs(this._touchStartLocation.y - y),
-					distance = Math.sqrt(Math.pow(this._touchStartLocation.x - x,2) + Math.pow(this._touchStartLocation.y - y,2)),
-					angleOK;
-				!this._distanceThresholdPassed && (this._distanceThresholdPassed = distance > this._distanceThreshold);
-				
-				if (this._distanceThresholdPassed) {
-					// If the distance is small, then the angle is way restrictive, so we ignore it
-					if (distance <= this._distanceThreshold || xDiff === 0 || yDiff === 0) {
-						angleOK = true;
-					} else if (xDiff > yDiff) {
-						angleOK = Math.atan(yDiff/xDiff) < this._angleThreshold;
-					} else {
-						angleOK = Math.atan(xDiff/yDiff) < this._angleThreshold;
-					}
-					if (!angleOK) {
-						this._touchStartLocation = null;
-					} else {
-						
-						if (!element._isGestureBlocked(this.name)) {
-							
+			if (e.touches.length == 0 && e.changedTouches.length == 1 && this._touchStartLocation) {
+				var x = e.changedTouches[0].clientX,
+						y = e.changedTouches[0].clientY,
+						xDiff = Math.abs(this._touchStartLocation.x - x),
+						yDiff = Math.abs(this._touchStartLocation.y - y),
+						distance = Math.sqrt(Math.pow(this._touchStartLocation.x - x, 2) + Math.pow(this._touchStartLocation.y - y, 2)),
+						angleOK,
+						direction,
+						velocity;
+					!this._distanceThresholdPassed && (this._distanceThresholdPassed = distance > distanceThreshold);
+					
+					if (this._distanceThresholdPassed) {
+						// If the distance is small, then the angle is way restrictive, so we ignore it
+						if (distance <= distanceThreshold || xDiff === 0 || yDiff === 0) {
+							angleOK = true;
+						} else if (xDiff > yDiff) {
+							angleOK = Math.atan(yDiff/xDiff) < angleThreshold;
+						} else {
+							angleOK = Math.atan(xDiff/yDiff) < angleThreshold;
+						}
+						if (angleOK) {
 							// Calculate the direction
-							var direction;
-							if (xDiff > yDiff) {
-								direction =  this._touchStartLocation.x - x > 0 ? "left" : "right";
-							} else {
-								direction =  this._touchStartLocation.y - y > 0 ? "down" : "up";
-							}
-							
-							// Right now only left and right are supported
-							if (direction === "left" || direction === "right") {
+							direction = xDiff > yDiff ?
+								this._touchStartLocation.x - x > 0 ? "left" : "right" :
+								this._touchStartLocation.y - y < 0 ? "down" : "up";
+							velocity = Math.abs(distance / ((new Date).getTime() - this._startTime));
+							if (velocity > velocityThreshold) {
 								lang.hitch(element,element._handleTouchEvent(this.name,{
 									x: x,
 									y: y,
 									direction: direction,
-									_distance: x - this._touchStartLocation.x,
-									_finishedSwiping: finishedSwiping,
 									source: this.getSourceNode(e,element)
 								}));
 							}
 						}
 					}
-				}
 			}
+			this._touchStartLocation = null;
+		},
+
+		processTouchCancelEvent: function(e, element){
+			this._touchStartLocation = null;
 		}
-		
 	});
 	
 });
@@ -14943,4 +17296,4 @@ p.setString("ti.fs.backend","Ti/_/Filesystem/Local");
 p.setString("ti.map.apikey","");
 p.setString("ti.map.backend","Ti/_/Map/Google");
 });
-require(["Ti", "Ti/Accelerometer", "Ti/Analytics", "Ti/Facebook/LoginButton", "Ti/Filesystem/FileStream", "Ti/Map/Annotation", "Ti/Map/View", "Ti/Media/VideoPlayer", "Ti/Network/HTTPClient", "Ti/Platform/DisplayCaps", "Ti/UI/2DMatrix", "Ti/UI/ActivityIndicator", "Ti/UI/AlertDialog", "Ti/UI/Animation", "Ti/UI/Clipboard", "Ti/UI/EmailDialog", "Ti/UI/ImageView", "Ti/UI/Label", "Ti/UI/MobileWeb", "Ti/UI/OptionDialog", "Ti/UI/Picker", "Ti/UI/PickerColumn", "Ti/UI/PickerRow", "Ti/UI/ProgressBar", "Ti/UI/ScrollView", "Ti/UI/ScrollableView", "Ti/UI/Slider", "Ti/UI/Switch", "Ti/UI/Tab", "Ti/UI/TabGroup", "Ti/UI/TableView", "Ti/UI/TableViewRow", "Ti/UI/TableViewSection", "Ti/UI/TextArea", "Ti/UI/TextField", "Ti/UI/WebView", "Ti/UI/Window", "Ti/XML", "Ti/Yahoo", "Ti/_/text", "Ti/_/text!Ti/_/UI/WebViewBridge.js"]);
+require(["Ti", "Ti/Accelerometer", "Ti/Analytics", "Ti/Facebook/LoginButton", "Ti/Filesystem/FileStream", "Ti/Map/Annotation", "Ti/Map/View", "Ti/Media/VideoPlayer", "Ti/Network/HTTPClient", "Ti/Platform/DisplayCaps", "Ti/UI/2DMatrix", "Ti/UI/ActivityIndicator", "Ti/UI/AlertDialog", "Ti/UI/Animation", "Ti/UI/Clipboard", "Ti/UI/EmailDialog", "Ti/UI/ImageView", "Ti/UI/Label", "Ti/UI/OptionDialog", "Ti/UI/Picker", "Ti/UI/PickerColumn", "Ti/UI/PickerRow", "Ti/UI/ProgressBar", "Ti/UI/ScrollView", "Ti/UI/ScrollableView", "Ti/UI/Slider", "Ti/UI/Switch", "Ti/UI/Tab", "Ti/UI/TabGroup", "Ti/UI/TableView", "Ti/UI/TableViewRow", "Ti/UI/TableViewSection", "Ti/UI/TextArea", "Ti/UI/TextField", "Ti/UI/WebView", "Ti/UI/Window", "Ti/XML", "Ti/Yahoo", "Ti/_/Gestures/DoubleTap", "Ti/_/Gestures/Dragging", "Ti/_/Gestures/LongPress", "Ti/_/Gestures/Pinch", "Ti/_/Gestures/SingleTap", "Ti/_/Gestures/Swipe", "Ti/_/Gestures/TouchCancel", "Ti/_/Gestures/TouchEnd", "Ti/_/Gestures/TouchMove", "Ti/_/Gestures/TouchStart", "Ti/_/Gestures/TwoFingerTap", "Ti/_/text", "Ti/_/text!Ti/_/UI/WebViewBridge.js"]);

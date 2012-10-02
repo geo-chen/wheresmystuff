@@ -1,115 +1,89 @@
-define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/_/lang", "Ti/Locale", "Ti/UI"],
-	function(declare, FontWidget, dom, css, style, lang, Locale, UI) {
+define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/dom", "Ti/_/css", "Ti/_/style", "Ti/_/lang", "Ti/Locale", "Ti/UI"],
+	function(declare, Widget, dom, css, style, lang, Locale, UI) {
 
-	var setStyle = style.set,
+	var on = require.on,
+		setStyle = style.set,
 		postDoBackground = {
-			post: "_updateLook"
+			post: function() {
+				if (this.backgroundColor || this.backgroundDisabledColor || this.backgroundDisabledImage || this.backgroundFocusedColor || 
+					this.backgroundFocusedImage || this.backgroundImage || this.backgroundSelectedColor || this.backgroundSelectedImage) {
+					this._clearDefaultLook();
+				} else {
+					this._setDefaultLook();
+				}
+				this._doBackground();
+			}
 		},
 		titlePost = {
-			post: "_updateTitle"
+			post: function() {
+				this._buttonTitle.text = Locale._getString(this.titleid, this.title);
+				this._hasSizeDimensions() && this._triggerLayout();
+			}
 		};
 
-	return declare("Ti.UI.Button", FontWidget, {
+	return declare("Ti.UI.Button", Widget, {
 
 		constructor: function() {
-			this._contentContainer = dom.create("div", {
-				className: "TiUIButtonContentContainer",
-				style: {
-					display: ["-webkit-box", "-moz-box"],
-					boxOrient: "horizontal",
-					boxPack: "center",
-					boxAlign: "center",
-					pointerEvents: "none",
-					width: "100%",
-					height: "100%"
-				}
-			}, this.domNode);
+			var contentContainer = this._contentContainer = UI.createView({
+					width: UI.INHERIT,
+					height: UI.INHERIT,
+					layout: UI._LAYOUT_CONSTRAINING_HORIZONTAL,
+					borderColor: "transparent"
+				}),
+				node = this.domNode;
 
-			this._buttonImage = dom.create("img", {
-				className: "TiUIButtonImage",
-				style: {
-					pointerEvents: "none"
-				}
-			}, this._contentContainer);
+			this._add(contentContainer);
 
-			this._buttonTitle = dom.create("div", {
-				className: "TiUIButtonTitle",
-				style: {
-					whiteSpace: "nowrap",
-					pointerEvents: "none",
-					userSelect: "none"
-				}
-			}, this._contentContainer);
-
-			this._addStyleableDomNode(this._buttonTitle);
-			
-			this._setDefaultLook();
-			
-			this.addEventListener("touchstart",function(){
-				if (this.selectedColor) {
-					setStyle(this._buttonTitle,"color",this.selectedColor);
-				}
-			});
-			this.addEventListener("touchend",function(){
-				if (this.selectedColor) {
-					setStyle(this._buttonTitle,"color",this.color || "black");
-				}
-			});
-			this.domNode.addEventListener("mouseout",lang.hitch(this,function(){
-				if (this.selectedColor) {
-					setStyle(this._buttonTitle,"color",this.color || "black");
-				}
+			contentContainer._add(this._buttonImage = UI.createImageView());
+			contentContainer._add(this._buttonTitle = UI.createLabel({
+				textAlign: UI.TEXT_ALIGNMENT_CENTER,
+				verticalAlign: UI.TEXT_VERTICAL_ALIGNMENT_CENTER,
+				width: UI.INHERIT,
+				height: UI.INHERIT
 			}));
+
+			this._setDefaultLook();
+
+			on(this, "touchstart", this, function() {
+				css.remove(node, "TiUIElementGradient");
+				css.add(node, "TiUIElementGradientActive");
+				this.selectedColor && (this._buttonTitle.color = this.selectedColor);
+			});
+			on(this, "touchend", this, function() {
+				css.remove(node, "TiUIElementGradientActive");
+				css.add(node, "TiUIElementGradient");
+				this.selectedColor && (this._buttonTitle.color = this.color || "#000");
+			});
+			on(node, "mouseout", this, function() {
+				this.selectedColor && (this._buttonTitle.color = this.color || "#000");
+			});
 		},
 
 		_defaultWidth: UI.SIZE,
 
 		_defaultHeight: UI.SIZE,
 		
-		_updateLook: function() {
-			if (this.backgroundColor || this.backgroundDisabledColor || this.backgroundDisabledImage || this.backgroundFocusedColor || 
-				this.backgroundFocusedImage || this.backgroundImage || this.backgroundSelectedColor || this.backgroundSelectedImage) {
-				this._clearDefaultLook();
-			} else {
-				this._setDefaultLook();
-			}
-			this._doBackground();
-		},
-		
 		_setDefaultLook: function() {
 			if (!this._hasDefaultLook) {
 				this._hasDefaultLook = true;
+				this._previousBorderWidth = this.borderWidth;
+				this._previousBorderColor = this.borderColor;
 				css.add(this.domNode, "TiUIElementGradient");
 				css.add(this.domNode, "TiUIButtonDefault");
+				this._contentContainer.borderWidth = 6;
+				this._getBorderFromCSS();
 			}
 		},
 		
 		_clearDefaultLook: function() {
 			if (this._hasDefaultLook) {
 				this._hasDefaultLook = false;
+				this.borderWidth = this._previousBorderWidth;
+				this.borderColor = this._previousBorderColor;
 				css.remove(this.domNode, "TiUIElementGradient");
 				css.remove(this.domNode, "TiUIButtonDefault");
+				this._contentContainer.borderWidth = 0;
 			}
-		},
-		
-		_getContentSize: function(width, height) {
-			return {
-				width: this._buttonImage.width + this._measureText(this.title, this._buttonTitle).width,
-				height: Math.max(this._buttonImage.height, this._measureText(this.title, this._buttonTitle).height)
-			};
-		},
-
-		_setTouchEnabled: function(value) {
-			FontWidget.prototype._setTouchEnabled.apply(this, arguments);
-			var cssVal = value ? "auto" : "none";
-			setStyle(this._contentContainer, "pointerEvents", cssVal);
-			setStyle(this._buttonImage, "pointerEvents", cssVal);
-			setStyle(this._buttonTitle, "pointerEvents", cssVal);
-		},
-
-		_updateTitle: function() {
-			this._buttonTitle.innerHTML = Locale._getString(this.titleid, this.title);
-			this._hasSizeDimensions() && this._triggerLayout();
 		},
 
 		properties: {
@@ -153,28 +127,22 @@ define(["Ti/_/declare", "Ti/_/UI/FontWidget", "Ti/_/dom", "Ti/_/css", "Ti/_/styl
 			
 			image: {
 				set: function(value) {
-					require.on(this._buttonImage, "load", lang.hitch(this, function () {
-						this._hasSizeDimensions() && this._triggerLayout();
-					}));
-					this._buttonImage.src = value;
+					this._buttonImage.image = value;
 					return value;
 				}
 			},
 			selectedColor: void 0,
 			textAlign: {
 				set: function(value) {
-					setStyle(this._contentContainer, "boxPack", value === UI.TEXT_ALIGNMENT_LEFT ? "start" : value === UI.TEXT_ALIGNMENT_RIGHT ? "end" : "center");
-					return value;
+					return this._buttonTitle.textAlign = value;
 				}
 			},
 			title: titlePost,
 			titleid: titlePost,
 			verticalAlign: {
 				set: function(value) {
-					setStyle(this._contentContainer, "boxAlign", value === UI.TEXT_VERTICAL_ALIGNMENT_TOP ? "start" : value === UI.TEXT_VERTICAL_ALIGNMENT_BOTTOM ? "end" : "center");
-					return value;
-				},
-				value: UI.TEXT_VERTICAL_ALIGNMENT_CENTER
+					return this._buttonTitle.verticalAlign = value;
+				}
 			}
 		}
 

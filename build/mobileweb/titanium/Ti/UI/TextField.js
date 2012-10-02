@@ -15,15 +15,28 @@ define(["Ti/_/declare", "Ti/_/UI/TextBox", "Ti/_/css", "Ti/_/dom", "Ti/_/lang", 
 					top: 0,
 					bottom: 0
 				}
-			}, this.domNode);
+			}, this._fieldWrapper = dom.create("span", {
+				style: {
+					position: "absolute",
+					left: 0,
+					right: 0,
+					top: 0,
+					bottom: 0
+				}
+			}, this.domNode));
 
 			this._initTextBox();
 			this._keyboardType();
 			this.borderStyle = UI.INPUT_BORDERSTYLE_BEZEL;
 
-			require.on(f, "focus", this, function() {
+			this._disconnectFocusEvent = require.on(f, "focus", this, function() {
 				this.clearOnEdit && (f.value = "");
 			});
+		},
+
+		destroy: function() {
+			this._disconnectFocusEvent();
+			TextBox.prototype.destroy.apply(this, arguments);
 		},
 
         _defaultWidth: UI.SIZE,

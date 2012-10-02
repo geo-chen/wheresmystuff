@@ -1,4 +1,5 @@
-define(["Ti/_/declare", "Ti/_/Evented", "Ti/Platform"], function(declare, Evented, Platform) {
+define(["Ti/_/declare", "Ti/_/Evented", "Ti/_/lang", "Ti/Platform"],
+	function(declare, Evented, lang, Platform) {
 
 	var isFF = Platform.runtime === "gecko",
 		api,
@@ -71,11 +72,11 @@ define(["Ti/_/declare", "Ti/_/Evented", "Ti/Platform"], function(declare, Evente
 		},
 
 		scale: function(x, y) {
-			return new api(mult(this, x, 0, 0, y, 0, 0));
+			return new api(mult(this, x, 0, 0, lang.val(y, x), 0, 0));
 		},
 
 		translate: function(x, y) {
-			return new api(mult(this, 0, 0, 0, 0, x, y));
+			return new api(mult(this, 1, 0, 0, 1, x, y));
 		},
 
 		toCSS: function() {

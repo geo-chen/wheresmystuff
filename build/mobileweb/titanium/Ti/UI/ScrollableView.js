@@ -1,35 +1,43 @@
-define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style", "Ti/UI"],
-	function(declare, Widget, lang, dom, style, UI) {
+define(["Ti/_/browser", "Ti/_/declare", "Ti/_/UI/KineticScrollView", "Ti/_/lang", "Ti/_/dom", "Ti/_/style", "Ti/UI", "Ti/_/event"],
+	function(browser, declare, KineticScrollView, lang, dom, style, UI, event) {
 
 	var setStyle = style.set,
 		is = require.is,
-		unitize = dom.unitize;
+		isDef = lang.isDef,
+		unitize = dom.unitize,
+		once = require.on.once,
 
-	return declare("Ti.UI.ScrollableView", Widget, {
+		// The maximum angle, in radians, from the axis a swipe is allowed to travel before it is no longer considered a swipe
+		angleThreshold = Math.PI/6, // 30 degrees
+
+		// Velocity bounds, used to make sure that animations don't become super long or super short
+		minVelocity = 0.4,
+		maxVelocity = 3,
 
 		// This sets the minimum velocity that determines whether a swipe was a flick or a drag
-		_velocityThreshold: 0.4,
+		velocityThreshold = 0.4,
 
 		// This determines the minimum distance scale (i.e. width divided by this value) before a flick requests a page turn
-		_minimumFlickDistanceScaleFactor: 15,
+		minimumFlickDistanceScaleFactor = 200,
 
 		// This determines the minimum distance scale (i.e. width divided by this value) before a drag requests a page turn
-		_minimumDragDistanceScaleFactor: 2,
+		minimumDragDistanceScaleFactor = 2;
+
+	return declare("Ti.UI.ScrollableView", KineticScrollView, {
 
 		constructor: function(args){
 
 			// Create the content container
-			this._contentContainer = UI.createView({
+			this._initKineticScrollView(UI.createView({
 				left: 0,
 				top: 0,
-				width: "100%",
-				height: "100%"
-			});
-			setStyle(this._contentContainer.domNode, "overflow", "hidden");
-			this.add(this._contentContainer);
+				width: UI.SIZE,
+				height: "100%",
+				layout: "constrainingHorizontal"
+			}), "horizontal");
 
 			// Create the paging control container
-			this.add(this._pagingControlContainer = UI.createView({
+			this._add(this._pagingControlContainer = UI.createView({
 				width: "100%",
 				height: 20,
 				bottom: 0,
@@ -38,284 +46,229 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 				touchEnabled: false
 			}));
 
-			this._pagingControlContainer.add(this._pagingControlContentContainer = UI.createView({
+			this._pagingControlContainer._add(this._pagingControlContentContainer = UI.createView({
 				width: UI.SIZE,
 				height: "100%",
 				top: 0,
-				touchEnabled: false
+				touchEnabled: false,
+				layout: "constrainingHorizontal"
 			}));
 
 			// State variables
+			this.properties.__values__.views = [];
 			this._viewToRemoveAfterScroll = -1;
 
-			var initialPosition,
-				animationView,
-				swipeInitialized = false,
-				viewsToScroll,
-				touchEndHandled,
-				startTime;
+			require.on(this, "postlayout", this._updateTranslation);
+		},
 
-			// This touch end handles the case where a swipe was started, but turned out not to be a swipe
-			this.addEventListener("touchend", function(e) {
-				if (!touchEndHandled && swipeInitialized) {
-					var width = this._measuredWidth,
-						destinationLeft = viewsToScroll.indexOf(this.views[this.currentPage]) * -width;
-					animationView.animate({
-						duration: (300 + 0.2 * width) / (width - Math.abs(e._distance)) * 10,
-						left: destinationLeft,
-						curve: UI.ANIMATION_CURVE_EASE_OUT
-					},lang.hitch(this,function(){
-						this._contentContainer._removeAllChildren();
-						this._contentContainer.add(this.views[this.currentPage]);
-					}));
-				}
-			})
+		_handleDragStart: function() {
+			var currentPage = this.currentPage;
+			if (~currentPage) {
+				this._showView(currentPage - 1);
+				this._showView(currentPage);
+				this._showView(currentPage + 1);
+				this.fireEvent("dragStart");
+			}
+		},
 
-			this.addEventListener("swipe", function(e){
-				// If we haven't started swiping yet, start swiping,
-				var width = this._measuredWidth;
-				if (!swipeInitialized) {
-					swipeInitialized = true;
-					touchEndHandled = false;
-					startTime = (new Date()).getTime();
-					
-					// Create the list of views that can be scrolled, the ones immediately to the left and right of the current view
-					initialPosition = 0;
-					viewsToScroll = [];
-					if (this.currentPage > 0) {
-						viewsToScroll.push(this.views[this.currentPage - 1]);
-						initialPosition = -width;
-					}
-					viewsToScroll.push(this.views[this.currentPage]);
-					if (this.currentPage < this.views.length - 1) {
-						viewsToScroll.push(this.views[this.currentPage + 1]);
-					}
-					
-					// Create the animation div
-					animationView = UI.createView({
-						width: unitize(viewsToScroll.length * width),
-						height: "100%",
-						left: initialPosition,
-						top: 0
-					});
-		
-					// Attach the child views, each contained in their own div so we can mess with positioning w/o touching the views
-					this._contentContainer._removeAllChildren();
-					for (var i = 0; i < viewsToScroll.length; i++) {
-						var viewContainer = UI.createView({
-							left: unitize(i * width),
-							top: 0,
-							width: unitize(width),
-							height: "100%",
-							layout: "horizontal" // Do a horizontal to force the child to (0,0) without overwriting the original position values
-						});
-						setStyle(viewContainer.domNode,"overflow","hidden");
-						viewContainer.add(viewsToScroll[i]);
-						animationView.add(viewContainer);
-					}
-					
-					// Set the initial position
-					animationView.left = unitize(initialPosition);
-					this._contentContainer.add(animationView);
-					this._triggerLayout(true);
+		_handleDrag: function(e) {
+			var currentPage = this.currentPage,
+				currentView = this.views[currentPage];
+			if (currentView) {
+				this.fireEvent("scroll", {
+					currentPage: currentPage,
+					currentPageAsFloat: currentPage - e.distanceX / currentView._measuredWidth,
+					view: currentView
+				});
+			}
+		},
+
+		_handleDragCancel: function() {
+			var currentPage = this.currentPage;
+			if (~currentPage) {
+				this._hideView(currentPage - 1);
+				this._showView(currentPage);
+				this._hideView(currentPage + 1);
+			}
+		},
+
+		_handleDragEnd: function(e, velocityX) {
+			if (~this.currentPage && isDef(velocityX)) {
+				velocityX = Math.max(minVelocity, Math.min(maxVelocity, velocityX));
+				var self = this,
+					views = self.views,
+					contentContainer = self._contentContainer,
+					currentPage = self.currentPage,
+					distance = e.distanceX,
+					normalizedWidth = views[currentPage]._measuredWidth / (Math.abs(velocityX) > velocityThreshold ? 
+						minimumFlickDistanceScaleFactor :
+						minimumDragDistanceScaleFactor),
+					destinationPosition,
+					destination = views[currentPage],
+					destinationIndex = currentPage;
+
+				// Determine the animation characteristics
+				if (distance > normalizedWidth && currentPage > 0) {
+					// Previous page
+					destinationIndex = currentPage - 1;
+					distance = (destination = views[destinationIndex])._measuredLeft - self._currentTranslationX;
+				} else if (distance < -normalizedWidth && currentPage < views.length - 1) {
+					// Next page
+					destinationIndex = currentPage + 1;
+					distance = self._currentTranslationX - (destination = views[destinationIndex])._measuredLeft;
 				}
-				
-				// Update the position of the animation div
-				var newPosition = initialPosition + e._distance;
-				newPosition = newPosition < 0 ? newPosition > -animationView._measuredWidth + width ? newPosition :-animationView._measuredWidth + width : 0;
-				animationView.domNode.style.left = unitize(newPosition);
-				
-				// If the swipe is finished, we animate to the final position
-				if (e._finishedSwiping) {
-					swipeInitialized = false;
-					touchEndHandled = true;
-					
-					// Determine whether this was a flick or a drag
-					var velocity = Math.abs((e._distance) / ((new Date()).getTime() - startTime));
-					var scaleFactor = velocity > this._velocityThreshold ? 
-						this._minimumFlickDistanceScaleFactor : this._minimumDragDistanceScaleFactor
-					
-					// Find out which view we are animating to
-					var destinationIndex = this.currentPage,
-						animationLeft = initialPosition;
-					if (e._distance > width / scaleFactor && this.currentPage > 0) {
-						destinationIndex = this.currentPage - 1;
-						animationLeft = 0;
-					} else if (e._distance < -width / scaleFactor && this.currentPage < this.views.length - 1) {
-						destinationIndex = this.currentPage + 1;
-						if (viewsToScroll.length === 3) {
-							animationLeft = -2 * width;
-						} else {
-							animationLeft = -width;
-						}
-					}
-					
-					var self = this;
-					function finalizeSwipe() {
-						self._contentContainer._removeAllChildren();
-						self._contentContainer.add(self.views[destinationIndex]);
-						self._triggerLayout(true);
-						
-						self.currentPage !== destinationIndex && self.fireEvent("scroll",{
+				destinationPosition = -destination._measuredLeft;
+
+				// Fire the drag end event
+				self.fireEvent("dragEnd", {
+					currentPage: destinationIndex,
+					view: destination
+				});
+
+				// Animate the view. Note: the 1.724 constance was calculated, not estimated. It is NOT for tweaking.
+				// If tweaking is needed, tweak the velocity algorithm in KineticScrollView.
+				self._animateToPosition(destinationPosition, 0, Math.abs(1.724 * 
+						(destinationPosition - self._currentTranslationX) / velocityX), "ease-out", function(){
+					destinationIndex !== currentPage - 1 && self._hideView(currentPage - 1);
+					destinationIndex !== currentPage && self._hideView(currentPage);
+					destinationIndex !== currentPage + 1 && self._hideView(currentPage + 1);
+					self.properties.__values__.currentPage = destinationIndex;
+					self._showView(destinationIndex);
+					setTimeout(function(){
+						self.fireEvent("scrollEnd",{
 							currentPage: destinationIndex,
-							view: self.views[destinationIndex],
-							x: e.x,
-							y: e.y
+							view: destination
 						});
-						
-						self.properties.__values__.currentPage = destinationIndex;
-					}
-					
-					// Check if the user attempted to scroll past the edge, in which case we directly reset the view instead of animation
-					this._updatePagingControl(destinationIndex);
-					if (newPosition == 0 || newPosition == -animationView._measuredWidth + width) {
-						finalizeSwipe();
-					} else {
-						// Animate the view and set the final view
-						animationView.animate({
-							duration: 200 + (0.2 * width) / (width - Math.abs(e._distance)) * 10,
-							left: animationLeft,
-							curve: UI.ANIMATION_CURVE_EASE_OUT
-						},lang.hitch(this,function(){
-							finalizeSwipe();
-						}));
-					}
-				}
-			});
+					}, 1);
+				});
+			}
+		},
+
+		_hideView: function(index) {
+			var views = this.views;
+			index >= 0 && index < views.length && setStyle(views[index].domNode, "display", "none");
+		},
+
+		_showView: function(index) {
+			var views = this.views;
+			index >= 0 && index < views.length && setStyle(views[index].domNode, "display", "inherit");
 		},
 
 		addView: function(view){
 			if (view) {
 				this.views.push(view);
-	
-				// Check if any children have been added yet, and if not load this view
+				this._contentContainer._add(view);
 				if (this.views.length == 1) {
 					this.properties.__values__.currentPage = 0;
-					this._contentContainer._removeAllChildren();
-					this._contentContainer.add(view);
+				} else {
+					setStyle(view.domNode, "display", "none");
 				}
-				this._updatePagingControl(this.currentPage);
 			}
 		},
 
 		removeView: function(view) {
-			
+
 			// Get and validate the location of the view
 			var viewIndex = is(view,"Number") ? view : this.views.indexOf(view);
 			if (viewIndex < 0 || viewIndex >= this.views.length) {
 				return;
 			}
-	
+
 			// Update the view if this view was currently visible
-			if (viewIndex == this.currentPage) {
-				if (this.views.length == 1) {
-					this._contentContainer._removeAllChildren();
-					this._removeViewFromList(viewIndex);
-				} else {
-					this._viewToRemoveAfterScroll = viewIndex;
-				    this.scrollToView(viewIndex == this.views.length - 1 ? --viewIndex : ++viewIndex);
-				}
+			if (viewIndex == this.currentPage && this.views.length !== 1) {
+				this._viewToRemoveAfterScroll = viewIndex;
+				this.scrollToView(viewIndex == this.views.length - 1 ? --viewIndex : ++viewIndex);
 			} else {
 				this._removeViewFromList(viewIndex);
 			}
 		},
 
 		_removeViewFromList: function(viewIndex) {
-			// Remove the view
-			this.views.splice(viewIndex,1);
-	
-			// Update the current view if necessary
-			if (viewIndex < this.currentPage){
-				this.properties.__values__.currentPage--;
+
+			var contentContainer = this._contentContainer,
+				self = this;
+
+			// Update the current view if necessary once everything has been re-laid out.
+			if (viewIndex < this.currentPage) {
+				self.properties.__values__.currentPage--;
 			}
-			
-			this._updatePagingControl(this.currentPage);
+
+			// Remove the view and update the paging control
+			contentContainer._remove(self.views.splice(viewIndex,1)[0]);
+			!self.views.length && (self.properties.__values__.currentPage = -1);
+			once(UI, "postlayout", function() {
+				setTimeout(function(){
+					self._updateTranslation();
+				}, 1);
+			});
+			self._updatePagingControl(self.currentPage);
+		},
+
+		_updateTranslation: function() {
+			~this.currentPage && this._setTranslation(-this.views[this.currentPage]._measuredLeft, 0);
 		},
 
 		scrollToView: function(view) {
-			var viewIndex = is(view,"Number") ? view : this.views.indexOf(view)
+			var viewIndex = is(view,"Number") ? view : this.views.indexOf(view),
+				self = this;
 			
 			// Sanity check
 			if (viewIndex < 0 || viewIndex >= this.views.length || viewIndex == this.currentPage) {
 				return;
 			}
-	
-			// If the scrollableView hasn't been laid out yet, we can't do much since the scroll distance is unknown.
-			// At the same time, it doesn't matter since the user won't see it anyways. So we just append the new
-			// element and don't show the transition animation.
-			if (!this._contentContainer.domNode.offsetWidth) {
-				this._contentContainer._removeAllChildren();
-				this._contentContainer.add(this.views[viewIndex]);
-			} else {
-				
+
+			function scroll(){
+
 				// Calculate the views to be scrolled
-				var width = this._measuredWidth,
-					viewsToScroll = [],
-					scrollingDirection = -1,
-					initialPosition = 0;
-				if (viewIndex > this.currentPage) {
-					for (var i = this.currentPage; i <= viewIndex; i++) {
-						viewsToScroll.push(this.views[i]);
+				var contentContainer = self._contentContainer,
+					currentPage = self.currentPage,
+					destination = -self.views[viewIndex]._measuredLeft,
+					i;
+
+					// Calculate a weighted duration so that larger views take longer to scroll.
+					duration = 400 + 0.3 * (Math.abs(viewIndex - self.currentPage) * contentContainer._measuredWidth);
+
+				// Make the views that will be seen visible
+				if (currentPage < viewIndex) {
+					for(i = currentPage + 1; i <= viewIndex; i++) {
+						self._showView(i);
 					}
 				} else {
-					for (var i = viewIndex; i <= this.currentPage; i++) {
-						viewsToScroll.push(this.views[i]);
+					for(i = viewIndex; i < currentPage; i++) {
+						self._showView(i);
 					}
-					initialPosition = -(viewsToScroll.length - 1) * width;
-					scrollingDirection = 1;
 				}
-	
-				// Create the animation div
-				var animationView = UI.createView({
-					width: unitize(viewsToScroll.length * width),
-					height: "100%",
-					left: initialPosition,
-					top: 0
-				});
-	
-				// Attach the child views, each contained in their own div so we can mess with positioning w/o touching the views
-				this._contentContainer._removeAllChildren();
-				for (var i = 0; i < viewsToScroll.length; i++) {
-					var viewContainer = UI.createView({
-						left: unitize(i * width),
-						top: 0,
-						width: unitize(width),
-						height: "100%",
-						layout: "horizontal" // Do a horizontal to force the child to (0,0) without overwriting the original position values
-					});
-					setStyle(viewContainer.domNode,"overflow","hidden");
-					viewContainer.add(viewsToScroll[i]);
-					animationView.add(viewContainer);
-				}
-				
-				// Set the initial position
-				animationView.left = unitize(initialPosition);
-				this._contentContainer.add(animationView);
-				this._triggerLayout(true);
-	
-				// Set the start time
-				var duration = 300 + 0.2 * (width), // Calculate a weighted duration so that larger views take longer to scroll.
-					distance = (viewsToScroll.length - 1) * width;
-					
-				this._updatePagingControl(viewIndex);
-				animationView.animate({
-					duration: duration,
-					left: initialPosition + scrollingDirection * distance,
-					curve: UI.ANIMATION_CURVE_EASE_IN_OUT
-				},lang.hitch(this,function(){
-					this._contentContainer._removeAllChildren();
-					this._contentContainer.add(this.views[viewIndex]);
-					this._triggerLayout(true);
-					this.properties.__values__.currentPage = viewIndex;
-					if (this._viewToRemoveAfterScroll != -1) {
-						this._removeViewFromList(this._viewToRemoveAfterScroll);
-						this._viewToRemoveAfterScroll = -1;
+
+				// Animate the views
+				self._updatePagingControl(viewIndex);
+				self._animateToPosition(destination, 0, duration, "ease-in-out", function(){
+					self.properties.__values__.currentPage = viewIndex;
+					if (currentPage < viewIndex) {
+						for(i = currentPage; i < viewIndex; i++) {
+							self._hideView(i);
+						}
+					} else {
+						for(i = viewIndex + 1; i <= currentPage; i++) {
+							self._hideView(i);
+						}
 					}
-					this.fireEvent("scroll",{
+					if (self._viewToRemoveAfterScroll !== -1) {
+						destination += self.views[self._viewToRemoveAfterScroll]._measuredWidth;
+						self._removeViewFromList(self._viewToRemoveAfterScroll);
+						self._viewToRemoveAfterScroll = -1;
+					}
+					self.fireEvent("scrollEnd",{
 						currentPage: viewIndex,
-						view: this.views[viewIndex]
+						view: self.views[viewIndex]
 					});
-				}));
+				});
+			}
+
+			// If the scrollableView hasn't been laid out yet, we must wait until it is
+			if (self._contentContainer.domNode.offsetWidth) {
+				scroll();
+			} else {
+				once(self, "postlayout", scroll);
 			}
 		},
 
@@ -342,20 +295,22 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 		},
 
 		_updatePagingControl: function(newIndex, hidePagingControl) {
-			this._pagingControlContentContainer._removeAllChildren();
-			var diameter = this.pagingControlHeight / 2;
-			for (var i = 0; i < this.views.length; i++) {
-				var indicator = UI.createView({
-					width: diameter,
-					height: diameter,
-					top: diameter / 2,
-					left: i * 2 * diameter,
-					backgroundColor: i === newIndex ? "white" : "grey"
-				});
-				setStyle(indicator.domNode,"borderRadius",unitize(diameter / 2));
-				this._pagingControlContentContainer.add(indicator);
+			if (this.showPagingControl) {
+				this._pagingControlContentContainer._removeAllChildren();
+				var diameter = this.pagingControlHeight / 2;
+				for (var i = 0; i < this.views.length; i++) {
+					var indicator = UI.createView({
+						width: diameter,
+						height: diameter,
+						left: 5,
+						right: 5,
+						backgroundColor: i === newIndex ? "white" : "grey",
+						borderRadius: unitize(diameter / 2)
+					});
+					this._pagingControlContentContainer._add(indicator);
+				}
+				!hidePagingControl && this._showPagingControl();
 			}
-			!hidePagingControl && this._showPagingControl();
 		},
 
 		_defaultWidth: UI.FILL,
@@ -370,7 +325,8 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 						return value;
 					}
 					return oldValue;
-				}
+				},
+				value: -1
 			},
 			pagingControlColor: {
 				set: function(value) {
@@ -388,35 +344,44 @@ define(["Ti/_/declare", "Ti/_/UI/Widget", "Ti/_/lang", "Ti/_/dom", "Ti/_/style",
 			},
 			pagingControlTimeout: {
 				set: function(value) {
-					this.pagingControlTimeout == 0 && this._hidePagingControl();
+					this.pagingControlTimeout == 0 && this._updatePagingControl();
 					return value;
 				},
 				value: 1250
 			},
 			showPagingControl: {
 				set: function(value) {
-					this.pagingControlTimeout == 0 && this._hidePagingControl();
+					this.pagingControlTimeout == 0 && this._updatePagingControl();
 					return value;
 				},
 				value: false
 			},
 			views: {
-				set: function(value, oldValue) {
+				set: function(value) {
+
 					// Value must be an array
 					if (!is(value,"Array")) {
 						return;
 					}
-					if (oldValue.length == 0 && value.length > 0) {
-						this._contentContainer._removeAllChildren();
-						this._contentContainer.add(value[0]);
+
+					// Add the views to the content container
+					var i = 0,
+						len = value.length,
+						contentContainer = this._contentContainer,
+						view;
+					contentContainer._removeAllChildren();
+					for(; i < len; i++) {
+						(view = value[i]).width = "100%";
+						view.height = "100%";
+						contentContainer._add(view);
 					}
-					this.properties.__values__.currentPage = 0;
+					this.properties.__values__.currentPage = len ? 0 : -1;
+
 					return value;
 				},
 				post: function() {
 					this._updatePagingControl(this.currentPage,true);
-				},
-				value: []
+				}
 			}
 		}
 

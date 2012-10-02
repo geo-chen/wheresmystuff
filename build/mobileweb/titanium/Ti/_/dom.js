@@ -7,7 +7,7 @@
  * <http://dojotoolkit.org>
  */
 
-define(["Ti/_", "Ti/_/style"], function(_, style) {
+define(["Ti/_", "Ti/API", "Ti/_/style"], function(_, API, style) {
 	var is = require.is,
 		forcePropNames = {
 			innerHTML:	1,
@@ -98,10 +98,14 @@ define(["Ti/_", "Ti/_/style"], function(_, style) {
 			}
 		},
 
+		calculateDistance: function(ax, ay, bx, by) {
+			return Math.sqrt(Math.pow(ax - bx,2) + Math.pow(ay - by, 2));
+		},
+
 		unitize: function(x) {
 			return isNaN(x-0) || x-0 != x ? x : x + "px"; // note: must be != and not !==
 		},
-		
+
 		computeSize: function(x, totalLength, convertSizeToUndef) {
 			if (is(x,"Number") && isNaN(x)) {
 				return 0;
@@ -113,22 +117,31 @@ define(["Ti/_", "Ti/_/style"], function(_, style) {
 					convertSizeToUndef && (x = void 0);
 				} else {
 					var value = parseFloat(x),
-						units = x.substring(x.length - 2);
-					units.indexOf("%") !== -1 && (units = "%");
+						units = x.match(/.*(%|mm|cm|em|pt|in|px|dp)$/);
+					if (units) {
+						units = units[1];
+					} else {
+						units = "px";
+					}
 
 					switch(units) {
 						case "%":
 							if(totalLength == UI.SIZE) {
 								convertSizeToUndef ? void 0 : UI.SIZE;
 							} else if (!require.is(totalLength,"Number")) {
-								console.error("Could not compute percentage size/position of element.");
+								API.error("Could not compute percentage size/position of element.");
 								return;
 							} 
 							return value / 100 * totalLength;
 						case "mm":
-							value *= 10;
+							value /= 10;
 						case "cm":
-							return value * 0.0393700787 * _.dpi;
+							return value * 0.393700787 * _.dpi;
+						case "em":
+						case "pt":
+							value /= 12;
+						case "pc":
+							value /= 6;
 						case "in":
 							return value * _.dpi;
 						case "px":

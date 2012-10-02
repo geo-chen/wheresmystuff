@@ -145,6 +145,10 @@ define(["Ti/_", "Ti/_/lang"], function(_, lang) {
 				}
 			}
 
+			this.toString === Object.prototype.toString && (this.toString = function() {
+				return "[object " + dc.replace(/\./g, '') + "]";
+			});
+
 			// 4) continue the original ritual: call the postscript
 			f = this.postscript;
 			f && f.apply(this, args);

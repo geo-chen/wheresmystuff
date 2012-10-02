@@ -14,6 +14,9 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 			"List": function(value) {
 				return require.is(value, "Array") ? value : [value];
 			},
+			"Object": function(value) {
+				return value;
+			},
 			"String": function(value) {
 				return "" + value;
 			}
@@ -51,13 +54,13 @@ define(["Ti/_/Evented", "Ti/_/lang"], function(Evented, lang) {
 
 	function getProp(prop, type, defaultValue) {
 		var value = getStorage(prop);
-		return value === void 0 ? defaultValue || null : types[type] ? types[type](value) : value;
+		return value === void 0 ? lang.val(defaultValue, null) : types[type] ? types[type](value) : value;
 	}
 
 	function setProp(prop, type, value) {
 		if (prop) {
 			getStorage();
-			if (value === void 0) {
+			if (value === void 0 || value === null) {
 				delete storage[prop];
 			} else {
 				storage[prop] = types[type] ? types[type](value) : value;

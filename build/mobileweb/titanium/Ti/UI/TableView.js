@@ -1,155 +1,127 @@
-define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb/TableViewSeparatorStyle", "Ti/UI"], 
-	function(declare, View, style, lang, TableViewSeparatorStyle, UI) {
+define(["Ti/_/declare", "Ti/_/UI/KineticScrollView", "Ti/_/style", "Ti/_/lang", "Ti/UI/MobileWeb/TableViewSeparatorStyle", "Ti/UI"], 
+	function(declare, KineticScrollView, style, lang, TableViewSeparatorStyle, UI) {
 
 	var setStyle = style.set,
 		is = require.is,
 		isDef = lang.isDef,
-		refreshSections = function() {
-			this._refreshSections();
-		};
-		
-	return declare("Ti.UI.TableView", View, {
-		
+		regexpClickTap = /^(click|singletap)$/,
+
+		// The amount of deceleration (in pixels/ms^2)
+		deceleration = 0.001;
+
+	return declare("Ti.UI.TableView", KineticScrollView, {
+
 		constructor: function(args) {
-			
-			// Content must go in a separate container so the scrollbar can exist outside of it
-			var contentContainer = this._contentContainer = UI.createView({
+
+			var self = this,
+				scrollbarTimeout,
+				contentContainer;
+			self._initKineticScrollView(contentContainer = UI.createView({
 				width: UI.INHERIT,
-				height: UI.INHERIT,
+				height: UI.SIZE,
 				left: 0,
 				top: 0,
-				layout: 'vertical'
-			});
-			this.add(contentContainer);
-			setStyle(contentContainer.domNode,"overflow","hidden");
-			
-			// Use horizontal layouts so that the default location is always (0,0)
-			contentContainer.add(this._header = UI.createView({
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
+			}), "vertical", "vertical", 1);
+
+			contentContainer._add(self._header = UI.createView({
 				height: UI.SIZE, 
 				width: UI.INHERIT, 
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			contentContainer.add(this._sections = UI.createView({
+			contentContainer._add(self._sections = UI.createView({
 				height: UI.SIZE, 
 				width: UI.INHERIT, 
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			contentContainer.add(this._footer = UI.createView({
+			contentContainer._add(self._footer = UI.createView({
 				height: UI.SIZE, 
 				width: UI.INHERIT, 
-				layout: "vertical"
+				layout: UI._LAYOUT_CONSTRAINING_VERTICAL
 			}));
-			
-			this.data = [];
-			
-			this._createVerticalScrollBar();
-			
-			var self = this;
-			function getContentHeight() {
-				return self._header._measuredHeight + self._sections._measuredHeight + self._footer._measuredHeight;
+
+			self.data = [];
+		},
+
+		_handleMouseWheel: function() {
+			this._fireScrollEvent("scroll");
+		},
+
+		_handleDragStart: function(e) {
+			this.fireEvent("dragStart");
+		},
+
+		_handleDrag: function(e) {
+			this._fireScrollEvent("scroll", e);
+		},
+
+		_handleDragEnd: function(e, velocityX, velocityY) {
+			var self = this,
+				y = -self._currentTranslationY;
+			if (isDef(velocityY)) {
+				var distance = velocityY * velocityY / (1.724 * deceleration) * (velocityY < 0 ? -1 : 1),
+					duration = Math.abs(velocityY) / deceleration,
+					translation = Math.min(0, Math.max(self._minTranslationY, self._currentTranslationY + distance));
+				self.fireEvent("dragEnd",{
+					decelerate: true
+				});
+				self._animateToPosition(self._currentTranslationX, translation, duration, "ease-out", function() {
+					self._setTranslation(self._currentTranslationX, translation);
+					self._endScrollBars();
+					self._fireScrollEvent("scrollEnd", e);
+				});
 			}
 			
-			// Handle scrolling
-			var previousTouchLocation;
-			this.addEventListener("touchstart",function(e) {
-				previousTouchLocation = e.y;
-				
-				this._startScrollBars({
-					y: contentContainer.domNode.scrollTop / (getContentHeight() - this._measuredHeight)
-				},
-				{
-					y: contentContainer._measuredHeight / (getContentHeight())
-				});
-			});
-			this.addEventListener("touchend",function(e) {
-				previousTouchLocation = null;
-				
-				this._endScrollBars();
-				
-				// Create the scroll event
-				this._isScrollBarActive && this.fireEvent("scrollEnd",{
-					contentOffset: {x: 0, y: contentContainer.domNode.scrollTop + this._header._measuredHeight},
-					contentSize: {width: this._sections._measuredWidth, height: this._sections._measuredHeight},
-					size: {width: this._measuredWidth, height: this._measuredHeight},
-					x: e.x,
-					y: e.y
-				});
-			});
-			this.addEventListener("touchmove",lang.hitch(this,function(e) {
-				contentContainer.domNode.scrollTop += previousTouchLocation - e.y;
-				previousTouchLocation = e.y;
-				
-				this._updateScrollBars({
-					y: contentContainer.domNode.scrollTop / (getContentHeight() - this._measuredHeight)
-				});
-				
-				this._fireScrollEvent(e.x,e.y);
-			}));
-			this.domNode.addEventListener("mousewheel",function(e) {
-				self._startScrollBars({
-					y: contentContainer.domNode.scrollTop / (getContentHeight() - self._measuredHeight)
-				},
-				{
-					y: contentContainer._measuredHeight / (getContentHeight())
-				});
-				setTimeout(function(){
-					contentContainer.domNode.scrollLeft -= e.wheelDeltaX;
-					contentContainer.domNode.scrollTop -= e.wheelDeltaY;
-					self._updateScrollBars({
-						y: (contentContainer.domNode.scrollTop - e.wheelDeltaY) / (getContentHeight() - self._measuredHeight)
-					});
-					setTimeout(function(){
-						self._endScrollBars();
-					},10);
-				},10);
-			});
-			
-			require.on(contentContainer.domNode,"scroll",lang.hitch(this,function(e){
-				if (!this._touching) {
-					this._fireScrollEvent();
-				}
-			}));
 		},
-		
-		_fireScrollEvent: function(x,y) {
+
+		_fireScrollEvent: function(type, e) {
 			// Calculate the visible items
 			var firstVisibleItem,
 				visibleItemCount = 0,
-				scrollTop = this._contentContainer.scrollTop,
-				sections = this._sections.children;
-			for(var i = 0; i < sections.length; i+= 2) {
-				
+				contentContainer = this._contentContainer,
+				y = -this._currentTranslationY,
+				sections = this._sections,
+				sectionsList = sections._children,
+				len = sectionsList.length;
+			for(var i = 0; i < len; i+= 2) {
+
 				// Check if the section is visible
-				var section = sections[i],
-					sectionOffsetTop = section._measuredTop - scrollTop,
-					sectionOffsetBottom = section._measuredTop + section._measuredHeight - scrollTop;
-				if (sectionOffsetBottom > 0 && sectionOffsetTop < this._contentContainer._measuredHeight) {
-					
-					var rows = section._rows.children
+				var section = sectionsList[i],
+					sectionOffsetTop = y - section._measuredTop,
+					sectionOffsetBottom = section._measuredHeight - sectionOffsetTop;
+				if (sectionOffsetTop > 0 && sectionOffsetBottom > 0) {
+					var rows = section._rows._children
 					for (var j = 1; j < rows.length; j += 2) {
 						var row = rows[j],
-							rowOffsetTop = row._measuredTop + section._measuredTop - scrollTop,
-							rowOffsetBottom = row._measuredTop + row._measuredHeight + section._measuredTop - scrollTop;
-						if (rowOffsetBottom > 0 && rowOffsetTop < this._contentContainer._measuredHeight) {
+							rowOffsetTop = sectionOffsetTop - row._measuredTop,
+							rowOffsetBottom = row._measuredHeight - rowOffsetTop;
+						if (rowOffsetTop > 0 && rowOffsetBottom > 0) {
 							visibleItemCount++;
-							if (!firstVisibleItem) {
-								firstVisibleItem = row;
-							}
+							!firstVisibleItem && (firstVisibleItem = row);
 						}
 					}
 				}
 			}
-			
+
 			// Create the scroll event
-			this._isScrollBarActive && this.fireEvent("scroll",{
-				contentOffset: {x: 0, y: this._contentContainer.scrollTop},
-				contentSize: {width: this._sections._measuredWidth, height: this._sections._measuredHeight},
+			this.fireEvent(type, {
+				contentOffset: {
+					x: 0,
+					y: y
+				},
+				contentSize: {
+					width: sections._measuredWidth,
+					height: sections._measuredHeight
+				},
 				firstVisibleItem: firstVisibleItem,
-				size: {width: this._contentContainer._measuredWidth, height: this._contentContainer._measuredHeight},
+				size: {
+					width: contentContainer._measuredWidth,
+					height: contentContainer._measuredHeight
+				},
 				totalItemCount: this.data.length,
 				visibleItemCount: visibleItemCount,
-				x: x,
-				y: y
+				x: e && e.x,
+				y: e && e.y
 			});
 		},
 
@@ -158,18 +130,24 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		_defaultHeight: UI.FILL,
 		
 		_getContentOffset: function(){
-			return {x: this._contentContainer.scrollLeft, y: this._contentContainer.scrollTop};
+			return {
+				x: -this._currentTranslationX,
+				y: -this._currentTranslationY
+			};
 		},
 		
 		_handleTouchEvent: function(type, e) {
+			var i = 0,
+				index = 0,
+				localIndex,
+				sections = this._sections._children,
+				row = this._tableViewRowClicked,
+				section = this._tableViewSectionClicked;
 			if (type === "click" || type === "singletap") {
-				if (this._tableViewRowClicked && this._tableViewSectionClicked) {
-					e.row = this._tableViewRowClicked;
-					e.rowData = this._tableViewRowClicked;
-					var index = 0,
-						sections = this._sections.children;
-					for(var i = 0; i < sections.length; i+= 2) {
-						var localIndex = sections[i]._rows.children.indexOf(this._tableViewRowClicked);
+				if (row && section) {
+					
+					for (; i < sections.length; i += 2) {
+						localIndex = sections[i]._rows._children.indexOf(row);
 						if (localIndex !== -1) {
 							index += Math.floor(localIndex / 2);
 							break;
@@ -177,19 +155,21 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 							index += sections[i].rowCount;
 						}
 					}
+					e.row = e.rowData = row;
 					e.index = index;
-					e.section = this._tableViewSectionClicked;
+					e.section = section;
 					e.searchMode = false; 
-					View.prototype._handleTouchEvent.apply(this,arguments); // This intentionally squelches the event if a row was not click
+	
+					KineticScrollView.prototype._handleTouchEvent.apply(this, arguments);
+	
+					this._tableViewRowClicked = null;
+					this._tableViewSectionClicked = null;
 				}
 			} else {
-				View.prototype._handleTouchEvent.apply(this,arguments);
+				KineticScrollView.prototype._handleTouchEvent.apply(this, arguments);
 			}
 		},
-		
-		_tableViewRowClicked: null,
-		_tableViewSectionClicked: null,
-		
+
 		_createSeparator: function() {
 			var separator = UI.createView({
 				height: 1,
@@ -213,8 +193,8 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		},
 		
 		_refreshSections: function() {
-			for (var i = 0; i < this._sections.children.length; i += 2) {
-				this._sections.children[i]._refreshRows();
+			for (var i = 0; i < this._sections._children.length; i += 2) {
+				this._sections._children[i]._refreshRows();
 			}
 			this._triggerLayout();
 		},
@@ -222,8 +202,8 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		_calculateLocation: function(index) {
 			var currentOffset = 0,
 				section;
-			for(var i = 0; i < this._sections.children.length; i += 2) {
-				section = this._sections.children[i];
+			for(var i = 0; i < this._sections._children.length; i += 2) {
+				section = this._sections._children[i];
 				currentOffset += section.rowCount;
 				if (index < currentOffset) {
 					return {
@@ -245,49 +225,56 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 		_insertRow: function(value, index) {
 			var location = this._calculateLocation(index);
 			if (location) {
-				location.section.add(value,location.localIndex);
+				location.section.add(value,location.localIndex); // We call the normal .add() method to hook into the sections proper add mechanism
 			}
+			this._publish(value);
 			this._refreshSections();
 		},
 		
 		_removeRow: function(index) {
 			var location = this._calculateLocation(index);
+			this._unpublish(location.section._rows._children[2 * location.localIndex + 1]);
 			if (location) {
 				location.section._removeAt(location.localIndex);
 			}
 		},
 
 		appendRow: function(value) {
-			this._currentSection.add(value);
+			if (!this._currentSection) {
+				this._sections._add(this._currentSection = UI.createTableViewSection({_tableView: this}));
+				this._sections._add(this._createSeparator());
+				this.data.push(this._currentSection);
+			}
+			this._currentSection.add(value); // We call the normal .add() method to hook into the sections proper add mechanism
+			this._publish(value);
 			this._refreshSections();
 		},
-		
+
 		deleteRow: function(index) {
 			this._removeRow(index);
 		},
-		
+
 		insertRowAfter: function(index, value) {
 			this._insertRow(value, index + 1);
 		},
-		
+
 		insertRowBefore: function(index, value) {
 			this._insertRow(value, index);
 		},
-		
+
 		updateRow: function(index, row) {
 			this._removeRow(index);
 			this._insertRow(row, index);
 		},
-		
+
 		scrollToIndex: function(index) {
 			var location = this._calculateLocation(index);
-			if (location) {
-				this._contentContainer.domNode.scrollTop = location.section._measuredTop + location.section._rows.children[2 * location.localIndex + 1]._measuredTop;
-			}
+			location && this._setTranslation(0,-location.section._measuredTop -
+				location.section._rows._children[2 * location.localIndex + 1]._measuredTop);
 		},
 		
 		scrollToTop: function(top) {
-			this._contentContainer.scrollTop = top;
+			this._setTranslation(0,-top);
 		},
 		
 		properties: {
@@ -299,6 +286,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 						
 						// Remove all of the previous sections
 						this._sections._removeAllChildren();
+						this._currentSection = void 0;
 						
 						// Convert any object literals to TableViewRow instances
 						for (var i in value) {
@@ -306,30 +294,24 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 								value[i] = UI.createTableViewRow(value[i]);
 							}
 						}
-						
-						// If there is no data, we still need to create a default section
-						if (value.length == 0) {
-							this._sections.add(this._currentSection = UI.createTableViewSection({_tableView: this}));
-							this._sections.add(this._createSeparator());
-							retval.push(this._currentSection);
-						}
 			
 						// Add each element
 						for (var i = 0; i < value.length; i++) {
 							if (value[i].declaredClass === "Ti.UI.TableViewRow") {
-								// Check if the first item is a row, meaning we need a default section
-								if (i === 0) {
-									this._sections.add(this._currentSection = UI.createTableViewSection({_tableView: this}));
-									this._sections.add(this._createSeparator());
+								// Check if we need a default section
+								if (!this._currentSection) {
+									this._sections._add(this._currentSection = UI.createTableViewSection({_tableView: this}));
+									this._sections._add(this._createSeparator());
 									retval.push(this._currentSection);
 								}
-								this._currentSection.add(value[i]);
+								this._currentSection.add(value[i]); // We call the normal .add() method to hook into the sections proper add mechanism
 							} else if (value[i].declaredClass === "Ti.UI.TableViewSection") {
 								value[i]._tableView = this;
-								this._sections.add(this._currentSection = value[i]);
-								this._sections.add(this._createSeparator());
+								this._sections._add(this._currentSection = value[i]);
+								this._sections._add(this._createSeparator());
 								retval.push(this._currentSection);
 							}
+							this._publish(value[i]);
 						}
 						this._refreshSections();
 						
@@ -344,7 +326,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._footer._removeAllChildren();
-						this._footer.add(this._createDecorationLabel(value));
+						this._footer._add(this._createDecorationLabel(value));
 					}
 					return value;
 				}
@@ -353,7 +335,7 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._footer._removeAllChildren();
-						this._footer.add(value);
+						this._footer._add(value);
 					}
 					return value;
 				}
@@ -362,8 +344,8 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._header._removeAllChildren();
-						this._header.add(this._createDecorationLabel(value));
-						this._header.add(this._createSeparator());
+						this._header._add(this._createDecorationLabel(value));
+						this._header._add(this._createSeparator());
 					}
 					return value;
 				}
@@ -372,27 +354,27 @@ define(["Ti/_/declare", "Ti/UI/View", "Ti/_/style", "Ti/_/lang","Ti/UI/MobileWeb
 				set: function(value, oldValue) {
 					if (oldValue != value) {
 						this._header._removeAllChildren();
-						this._header.add(value);
+						this._header._add(value);
 					}
 					return value;
 				}
 			},
 			maxRowHeight: {
-				post: refreshSections
+				post: "_refreshSections"
 			},
 			minRowHeight: {
-				post: refreshSections
+				post: "_refreshSections"
 			},
 			rowHeight: {
-				post: refreshSections,
+				post: "_refreshSections",
 				value: "50px"
 			},
 			separatorColor: {
-				post: refreshSections,
+				post: "_refreshSections",
 				value: "lightGrey"
 			},
 			separatorStyle: {
-				post: refreshSections,
+				post: "_refreshSections",
 				value: TableViewSeparatorStyle.SINGLE_LINE
 			}
 		}
