@@ -30,6 +30,10 @@ function ApplicationWindow() {
 		} else if (self.addView != undefined || self.addView != null) {
 			self.remove(self.addView);
 			self.addView = null;
+			if (self.itemDetaiView != undefined || self.itemDetailView != null) {
+				self.remove(self.itemDetailView);
+				self.itemDetailView = null;
+			}
 		} else if (self.profileView != undefined || self.profileView != null) {
 			self.remove(self.profileView);
 			self.profileView = null;
@@ -38,7 +42,7 @@ function ApplicationWindow() {
 
 	var titleLabel = Ti.UI.createLabel({
 		color : 'white',
-		text : "Where'sMyStuff",
+		text : "Where's My Stuff",
 		font : {
 			fontSize : 28
 		},
@@ -66,24 +70,37 @@ function ApplicationWindow() {
 		});
 
 		var searchBox = Ti.UI.createTextField({
-			top : 120,
+			top : 20,
 			width : 320,
 			height : 35,
 			left : 'auto'
 		});
 
-		var submitButton = Ti.UI.createButton({
-			title : 'Submit',
-			top : 179,
-			width : 'auto',
-			height : 'auto'
+		var submitButton = Ti.UI.createImageView({
+			top : 20,
+			height : 28,
+			width : 28,
+			left : (Ti.Platform.displayCaps.platformWidth / 2) + 42,
+			image : 'images/search.png'
 		});
 
 		submitButton.addEventListener('click', function(e) {
-			alert("Search has been sent!");
+			alert('You have searched for "Sports Shoes"');
+			var searchResults = Ti.UI.createScrollView({
+				width : 'auto',
+				contentWidth : 'auto',
+				contentHeight : 'auto',
+				top : 54
+			});
+			var searchResultsList = Ti.UI.createImageView({
+				left : (Ti.Platform.displayCaps.platformWidth / 2) - 152,
+				image : 'images/search-result.jpg'
+			});
+			searchResults.add(searchResultsList);
+			self.searchView.add(searchResults);
 		});
 
-		self.searchView.add(searchIcon);
+		//self.searchView.add(searchIcon);
 		self.searchView.add(searchBox);
 		self.searchView.add(submitButton);
 
@@ -111,15 +128,20 @@ function ApplicationWindow() {
 			image : 'images/camera.jpg'
 		});
 
+		camera.addEventListener('click', function(e) {
+			confirm("This will open the phone's camera app\nContinue?");
+		});
+
 		self.addView.add(chooseFrom);
 		self.addView.add(camera);
+		//self.addView.add(location);
 		self.add(self.addView);
 
 		chooseFrom.addEventListener('click', function(e) {
 			var selectionGallery = Ti.UI.createView({
-				top : 108,
+				top : 80,
 				width : 340,
-				backgroundColor : 'teal'
+				backgroundColor : 'white'
 			});
 			var backButton = Ti.UI.createLabel({
 				backgroundColor : 'black',
@@ -159,16 +181,16 @@ function ApplicationWindow() {
 			for (var i = 0; i < 3; i++) {
 				for (var j = 0; j < 3; j++) {
 					var count = 1;
-					var itemPhoto = Ti.UI.createView({
-						top : 10 + (i * 10) + (i * 100),
+					var itemPhoto = Ti.UI.createImageView({
+						top : 36 + (i * 10) + (i * 100),
 						left : 10 + (j * 10) + (j * 100),
 						width : 100,
 						height : 100,
-						backgroundColor : 'orange'
+						image : 'images/pink-pumps.jpg'
 					});
 					itemPhoto.addEventListener('click', function(e) {
 						if (confirm('itemImage.jpg selected\n\nUpload phtoto to create new item?')) {
-							var itemDetailView = Ti.UI.createView({
+							self.itemDetailView = Ti.UI.createView({
 								top : 48,
 								backgroundColor : 'white'
 							});
@@ -185,7 +207,8 @@ function ApplicationWindow() {
 								height : 'auto'
 							});
 							closeDetailButton.addEventListener('click', function(e) {
-								self.remove(itemDetailView);
+								self.remove(self.itemDetailView);
+								self.itemDetailView = null
 							});
 							var itemTitleLabel = Ti.UI.createLabel({
 								backgroundColor : 'white',
@@ -222,8 +245,8 @@ function ApplicationWindow() {
 								width : 200,
 								height : 24
 							});
-							itemDetailView.add(nameTextField);
-							itemDetailView.add(nameLabel);
+							self.itemDetailView.add(nameTextField);
+							self.itemDetailView.add(nameLabel);
 							var locationLabel = Ti.UI.createLabel({
 								left : 8,
 								top : 274 + 18 + 6,
@@ -241,8 +264,8 @@ function ApplicationWindow() {
 								width : 200,
 								height : 24
 							});
-							itemDetailView.add(locationTextField);
-							itemDetailView.add(locationLabel);
+							self.itemDetailView.add(locationTextField);
+							self.itemDetailView.add(locationLabel);
 							var tagsLabel = Ti.UI.createLabel({
 								left : 8,
 								top : 274 + 36 + 12,
@@ -260,10 +283,10 @@ function ApplicationWindow() {
 								width : 200,
 								height : 24
 							});
-							itemDetailView.add(tagsTextField);
-							itemDetailView.add(tagsLabel);
-							itemDetailView.add(itemTitleLabel);
-							itemDetailView.add(itemPhoto);
+							self.itemDetailView.add(tagsTextField);
+							self.itemDetailView.add(tagsLabel);
+							self.itemDetailView.add(itemTitleLabel);
+							self.itemDetailView.add(itemPhoto);
 
 							var saveButton = Ti.UI.createButton({
 								title : 'Save',
@@ -272,7 +295,10 @@ function ApplicationWindow() {
 								width : 100,
 								height : 24
 							});
-							itemDetailView.add(saveButton);
+							saveButton.addEventListener('click', function(e) {
+								alert('Item has been saved to you profile!');
+							});
+							self.itemDetailView.add(saveButton);
 
 							var addMoreButton = Ti.UI.createButton({
 								title : 'Add Another Item',
@@ -281,15 +307,27 @@ function ApplicationWindow() {
 								width : 200,
 								height : 24
 							});
-							itemDetailView.add(addMoreButton);
+							self.itemDetailView.add(addMoreButton);
 
-							itemDetailView.add(closeDetailButton);
-							self.add(itemDetailView);
+							self.itemDetailView.add(closeDetailButton);
+							self.add(self.itemDetailView);
 						}
 					});
 					selectionGallery.add(itemPhoto);
 				}
 			}
+
+			selectionGallery.add(Ti.UI.createLabel({
+				backgroundColor : 'white',
+				top : 10,
+				color : 'black',
+				text : "Select an item's image to upload",
+				font : {
+					fontSize : 18
+				},
+				width : 'auto',
+				height : 'auto'
+			}));
 
 			selectionGallery.add(backButton);
 			self.addView.add(selectionGallery);
@@ -307,12 +345,75 @@ function ApplicationWindow() {
 			backgroundColor : 'white'
 		});
 
-		var profile = Ti.UI.createImageView({
+		var profileLabel = Ti.UI.createImageView({
 			top : 24,
-			image : 'images/profilePage.jpg'
+			image : 'images/irenes-profile.jpg'
 		});
 
-		self.profileView.add(profile);
+		var profileCategoryLabel = Ti.UI.createImageView({
+			top : 24 + 82 + 6,
+			left : (Ti.Platform.displayCaps.platformWidth / 2) - 154,
+			image : 'images/choose-category.jpg'
+		});
+
+		var categoryTextField = Ti.UI.createTextField({
+			borderStyle : Ti.UI.INPUT_BORDERSTYLE_ROUNDED,
+			color : '#336699',
+			top : 24 + 82 + 6,
+			left : (Ti.Platform.displayCaps.platformWidth / 2),
+			width : 150,
+			height : 24
+		});
+
+		var profileFilterLabel = Ti.UI.createImageView({
+			top : 24 + 82 + 6 + 36,
+			left : (Ti.Platform.displayCaps.platformWidth / 2) - 154,
+			image : 'images/filter-by-category.jpg'
+		});
+
+		var filterTextField = Ti.UI.createTextField({
+			borderStyle : Ti.UI.INPUT_BORDERSTYLE_ROUNDED,
+			color : '#336699',
+			top : 24 + 82 + 6 + 36,
+			left : (Ti.Platform.displayCaps.platformWidth / 2),
+			width : 150,
+			height : 24
+		});
+
+		var activateFilterButton = Ti.UI.createLabel({
+			backgroundColor : 'black',
+			top : 24 + 82 + 6 + 36 + 34,
+			color : 'white',
+			text : "Filter Items",
+			font : {
+				fontSize : 18
+			},
+			width : 'auto',
+			height : 'auto'
+		});
+
+		activateFilterButton.addEventListener('click', function(e) {
+			var filterResults = Ti.UI.createScrollView({
+				width : 'auto',
+				contentWidth : 'auto',
+				contentHeight : 'auto',
+				top : 24 + 82 + 6 + 36 + 30 + 30
+			});
+			//alert('ok');
+			var resultsList = Ti.UI.createImageView({
+				left : (Ti.Platform.displayCaps.platformWidth / 2) - 152,
+				image : 'images/my-items.jpg'
+			});
+			filterResults.add(resultsList);
+			self.profileView.add(filterResults);
+		});
+
+		self.profileView.add(profileLabel);
+		self.profileView.add(profileFilterLabel);
+		self.profileView.add(categoryTextField);
+		self.profileView.add(filterTextField);
+		self.profileView.add(profileCategoryLabel);
+		self.profileView.add(activateFilterButton);
 		self.add(self.profileView);
 	});
 

@@ -8,8 +8,5 @@ Logfile initialized
 [TRACE] adb devices returned 0 devices/emulators
 [TRACE] adb devices returned 0 devices/emulators
 [TRACE] adb devices returned 0 devices/emulators
-[ERROR] Timed out waiting for device to be ready, you may try reconnecting the USB cable
-[TRACE] adb devices returned 0 devices/emulators
-[TRACE] adb devices returned 0 devices/emulators
 [TRACE] adb devices returned 0 devices/emulators
 [ERROR] Timed out waiting for device to be ready, you may try reconnecting the USB cable

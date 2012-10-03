@@ -40,7 +40,7 @@ function ApplicationWindow() {
 
 	var titleLabel = Ti.UI.createLabel({
 		color : 'white',
-		text : "Where'sMyStuff",
+		text : "Where's My Stuff",
 		font : {
 			fontSize : 34
 		},
@@ -114,8 +114,14 @@ function ApplicationWindow() {
 			image:'/images/camera.jpg'
 		});
 		
+		var location = Ti.UI.createImageView({
+			top : 48 + 60,
+			image : 'images/camera.jpg'
+		});
+		
 		self.addView.add(chooseFrom);
 		self.addView.add(camera);
+		self.addView.add(location);
 		self.add(self.addView);
 	});
 
